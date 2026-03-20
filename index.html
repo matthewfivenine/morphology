@@ -465,55 +465,47 @@ const progressions = [
 ];
 
 // ── Elijah Fox impressionistic arpeggio patterns ──────────────────────────
-// All index into 15-note chord pools (indices 0-14).
-// Fox techniques:
-//   Rapid scalar runs, "waterfall" descents, call-and-response bass/treble,
-//   rhythmic displacement (5+7+3), tremolo-then-burst, chromatic scatter,
-//   impressionist broken chords with unexpected leaps, rubato phrasing.
+// Biased toward mid/low register (indices 0-9 = oct 1-3).
+// High notes (10-14) appear as occasional peaks, not the main voice.
 const patterns = [
-  // "Ravel waterfall" — fast descent from top, then scattered ascent
-  [14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,
-   0,3,6,9,12, 1,4,7,10,13, 2,5,8,11,14,
-   14,12,10,8,6,4,2,0, 13,11,9,7,5,3,1],
+  // "Ravel waterfall" — starts high then cascades into mid/low warmth
+  [9,8,7,6,5,4,3,2,1,0, 0,2,4,6,8, 1,3,5,7, 0,4,7,3,6,2,5,1,4,0,3],
 
-  // "Fox call-response" — bass punch + treble answer (his signature)
-  [0,1,0,2,0, 14,13,12,11, 0,3,0,4, 13,12,11,10,
-   0,0,5,6,0, 14,13,10,  0,7,8,   12,11,9,
-   0,1,2,3,4, 14,13,12,11,10],
+  // "Fox call-response" — bass punch + mid answer (his signature)
+  [0,1,0,2,0,3, 8,7,6,5, 0,4,0,5, 7,6,5,4,
+   0,2,4,6,8, 7,5,3,1, 0,3,6,9, 8,5,2],
 
-  // "Displaced shimmer" — 5+5+5 Fox rhythmic displacement
-  [0,2,4,6,8,  10,12,14,11,9,  7,5,3,1,13,
-   0,4,8,12,3,  7,11,14,6,10,  2,5,9,13,1,
-   0,6,12,5,11, 4,10,3,9,14],
+  // "Displaced shimmer" — 5+5+5 Fox rhythmic displacement in mid range
+  [0,2,4,6,8,  6,4,2,0,3,  5,7,9,6,4,
+   0,3,6,9,4,  7,5,2,8,6,  1,4,7,3,5,
+   0,5,8,4,7,  3,6,2,9,5],
 
-  // "Chromatic cascade" — stepwise, all 15 notes
-  [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,
-   14,13,11,9,7,5,3,1,
-   0,2,5,8,11,14,10,6,2,13,9,5,1,12,7,3],
+  // "Chromatic cascade" — stepwise through mid range
+  [0,1,2,3,4,5,6,7,8,9,
+   9,8,7,6,5,4,3,2,1,0,
+   0,2,4,6,8,7,5,3,1, 0,3,6,9,7,4,2,5,8,6],
 
-  // "Tremolo burst" — Fox rapid-repeat then explosive run
-  [7,7,7,8,7,8,9, 14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,
-   0,0,0,1,0,1,2, 0,3,6,9,12,14,10,7,4,1,13,9,5,2],
+  // "Fox tremolo burst" — rapid repeat on mid note then rolling run
+  [4,4,4,5,4,5,6, 9,8,7,6,5,4,3,2,1,0,
+   3,3,3,4,3,4,5, 0,2,5,8,6,3,7,4,1,8,5],
 
-  // "Fox impressionist scatter" — wide leaps, never linear
-  [0,14,1,13,2,12,3,11,4,10,5,9,6,8,7,
-   0,12,3,14,1,11,4,13,2,10,5,9,6,8,7,
-   14,0,13,1,12,2,11,3,10,4,9,5,8,6,7],
+  // "Mid scatter" — wide leaps staying in mid/low zone
+  [0,9,1,8,2,7,3,6,4,5, 0,7,3,9,1,8,4,6,2,5,
+   9,0,8,1,7,2,6,3,5,4],
 
-  // "Ascending shimmer run" — Fox concert-style sweep
-  [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,
-   12,9,6,3,0,13,10,7,4,1,14,11,8,5,2,
-   0,2,4,6,8,10,12,14,11,9,7,5,3,1,0],
+  // "Ascending mid run" — Fox concert-style sweep through 1-3 octave
+  [0,1,2,3,4,5,6,7,8,9,
+   7,5,3,1,0,8,6,4,2,9,
+   0,2,4,6,8,9,7,5,3,1,0],
 
-  // "Pentatonic ghost" — ghost notes on 0,1 + loud upper register
-  [0,0,9,14,0,0,11,13,0,10,12,0,
-   0,1,8,14,1,0,9,13,0,7,12,1,0,
-   14,12,10,9,0,14,11,9,0,1,13,10,7],
+  // "Deep groove" — Fox left-hand heavy, low register emphasis
+  [0,0,2,3,0,4,5,0, 6,7,8,5,3,1,0,
+   0,1,0,3,0,5,6,7, 8,6,4,2,0,9,7,5,3,1],
 
-  // "Fox rubato" — long irregular phrase, rhythmically free
-  [0,3,7,11,14, 14,13,11,9,7,5,3,1,0,
-   0,4,9,13, 13,11,8,6,3,1,
-   0,2,5,8,11,14, 12,8,4,1,13,9,5,2,0],
+  // "Fox rubato" — flowing irregular phrase in mid range
+  [0,3,5,8,9, 9,8,6,4,2,1,0,
+   0,4,7,9, 8,6,4,2,0,
+   0,2,4,7,9, 8,5,3,1,9,6,4,2,0],
 ];
 
 
@@ -570,8 +562,9 @@ function scheduleArpeggio(){
 
   let t = audioCtx.currentTime + 0.04;
 
-  // Fox phrase state — determines current rhythmic character
-  let phraseType = 0; // 0=normal, 1=burst run, 2=sparse+ghost, 3=tremolo
+  // Fox phrase types — no sparse/rests, always flowing
+  // 0=swing 16ths, 1=burst 32nds, 2=triplet roll, 3=dotted swing
+  let phraseType = 0;
   let phraseNotesLeft = 0;
 
   function batch(n){
@@ -580,88 +573,79 @@ function scheduleArpeggio(){
 
       const chord = prog[chordIdx];
       const pat   = patterns[patIdx];
-      const ni    = pat[noteIdx % pat.length] % chord.notes.length;
+      // Bias toward lower 10 notes of the 15-note pool (mid/low range)
+      const rawIdx = pat[noteIdx % pat.length];
+      const ni = (rawIdx > 10 && Math.random() < 0.6)
+        ? rawIdx - 6   // pull high notes down into mid range
+        : rawIdx % chord.notes.length;
       const name  = chord.notes[ni];
       const oct   = chord.octs[ni];
       const freq  = noteFreq(name, oct);
 
-      // ── Phrase type cycling — Fox changes character every 8-16 notes ──
+      // Phrase type cycling — only flowing types, no rests
       if(phraseNotesLeft <= 0){
         phraseType = Math.floor(Math.random()*4);
-        phraseNotesLeft = 7 + Math.floor(Math.random()*9); // 7-15 notes per phrase
+        phraseNotesLeft = 8 + Math.floor(Math.random()*10);
       }
       phraseNotesLeft--;
 
-      // ── Step size: Fox uses irregular 16th/32nd/dotted rhythms ──
-      let step;
-      const beat16 = (60/currentBPM)*0.25; // 16th note
-      const beat8  = beat16*2;
+      const beat16 = (60/currentBPM)*0.25;
       const beat32 = beat16*0.5;
 
+      let step;
       if(phraseType === 1){
-        // Burst run — rapid 32nd notes, very fast shimmer
-        step = beat32 * (0.9 + Math.random()*0.2);
+        // Burst run — rapid 32nd notes, dense shimmer
+        step = beat32 * (0.88 + Math.random()*0.22);
       } else if(phraseType === 2){
-        // Sparse — slow, breathing, dotted notes with rests
-        step = beat8 * (1.3 + Math.random()*0.7);
-        // Occasional actual rest (skip a step)
-        if(Math.random()<0.22){
-          t += beat8 * (0.8 + Math.random()*0.6);
-        }
+        // Triplet roll — swinging triplets
+        const tri = beat16*(2/3);
+        step = tri * (0.92 + Math.random()*0.16);
       } else if(phraseType === 3){
-        // Tremolo feel — very fast then suddenly dotted
-        step = Math.random()<0.6 ? beat32 : beat8*(1+Math.random());
+        // Dotted swing — longer steps but never rests
+        step = beat16 * (1.2 + Math.random()*0.5);
       } else {
-        // Normal swing 16ths with Fox triplet feel
-        const swingFactor = (noteIdx%2===0) ? 1.08 : 0.92;
-        step = beat16 * swingFactor * (0.88 + Math.random()*0.24);
+        // Normal swing 16ths
+        const swingFactor = (noteIdx%2===0) ? 1.10 : 0.90;
+        step = beat16 * swingFactor * (0.90 + Math.random()*0.18);
       }
-      const humanize = (Math.random()-0.5)*0.011;
+      const humanize = (Math.random()-0.5)*0.009;
 
-      // ── Fox dynamics: very wide range ──
+      // Dynamics: continuous range, no extreme silences
       let vel;
       const pos = noteIdx % 16;
       if(phraseType === 1){
-        // Burst: mostly medium with a few loud accents
-        vel = Math.random()<0.2 ? 0.85+Math.random()*0.15 : 0.35+Math.random()*0.35;
+        vel = Math.random()<0.15 ? 0.82+Math.random()*0.18 : 0.38+Math.random()*0.32;
       } else if(phraseType === 2){
-        // Sparse: big dynamic contrasts — very quiet ghosts, very loud accents
-        vel = Math.random()<0.3 ? 0.08+Math.random()*0.10 : 0.72+Math.random()*0.28;
+        vel = 0.52 + Math.random()*0.32;
       } else if(phraseType === 3){
-        // Tremolo: consistent medium-loud
-        vel = 0.50 + Math.random()*0.30;
+        if(pos===0||pos===8)   vel = 0.80+Math.random()*0.18;
+        else                   vel = 0.45+Math.random()*0.28;
       } else {
-        if(pos===0)              vel = 0.88+Math.random()*0.12;
-        else if(pos===8)         vel = 0.70+Math.random()*0.14;
-        else if(pos===4||pos===12) vel = 0.55+Math.random()*0.20;
-        else if(Math.random()<0.18) vel = 0.08+Math.random()*0.10; // ghost
-        else                     vel = 0.28+Math.random()*0.34;
+        if(pos===0)              vel = 0.85+Math.random()*0.15;
+        else if(pos===8)         vel = 0.68+Math.random()*0.16;
+        else if(pos===4||pos===12) vel = 0.52+Math.random()*0.22;
+        else if(Math.random()<0.10) vel = 0.18+Math.random()*0.12; // light ghost
+        else                     vel = 0.35+Math.random()*0.30;
       }
 
-      // ── Note duration: Fox sustains some notes, clips others ──
-      const durMult = phraseType===1 ? 0.9 :
-                      phraseType===2 ? 2.8+Math.random()*1.5 :
-                      phraseType===3 ? 1.1 :
-                      (Math.random()<0.12 ? 3.5 : Math.random()<0.25 ? 2.0 : 1.5);
+      // Duration — sustain mid/low notes longer for warmth
+      const durMult = phraseType===1 ? 0.85 :
+                      phraseType===2 ? 1.4 :
+                      phraseType===3 ? 1.8+Math.random()*0.8 :
+                      (Math.random()<0.10 ? 2.8 : Math.random()<0.20 ? 1.9 : 1.4);
 
-      // ── Chromatic grace note — Fox's chromatic approach ──
-      if(Math.random()<0.14){
-        const semis = Math.random()<0.65 ? -1 : 1; // mostly from below
+      // Chromatic grace note
+      if(Math.random()<0.12){
+        const semis = Math.random()<0.65 ? -1 : 1;
         const gf = freq * Math.pow(2, semis/12);
-        const gt = piano(audioCtx, gf, t-0.028, 0.040, vel*0.28);
+        const gt = piano(audioCtx, gf, t-0.025, 0.038, vel*0.26);
         gt.connect(masterGain);
       }
 
-      // ── Octave doubling for body (Fox plays parallel octaves) ──
-      if(Math.random()<0.10){
-        const ot = piano(audioCtx, freq*2, t+humanize, step*durMult*0.85, vel*0.22);
+      // Occasional lower octave doubling for mid/low warmth
+      if(Math.random()<0.08 && oct >= 2){
+        const ot = piano(audioCtx, freq*0.5, t+humanize, step*durMult*0.9, vel*0.20);
         ot.connect(masterGain);
-      }
-
-      // ── Occasional 5th below for quartal richness ──
-      if(phraseType===2 && Math.random()<0.15){
-        const ft = piano(audioCtx, freq*0.749, t+humanize, step*durMult, vel*0.18);
-        ft.connect(masterGain);
       }
 
       const tone = piano(audioCtx, freq, t+humanize, step*durMult, vel);
