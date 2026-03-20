@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fluid Resonance</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;1,300&display=swap');
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;background:#04060f;overflow:hidden;font-family:'Cormorant Garamond',serif}
+  canvas{display:block;position:fixed;top:0;left:0;width:100%;height:100%}
+  #ui{position:fixed;bottom:40px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:14px;z-index:10;pointer-events:none}
+  #label{color:rgba(255,255,255,0.12);font-size:11px;letter-spacing:.35em;text-transform:uppercase;font-style:italic}
+  #btn{pointer-events:all;background:transparent;border:1px solid rgba(167,139,250,0.35);color:rgba(167,139,250,0.85);font-family:'Cormorant Garamond',serif;font-size:13px;font-style:italic;letter-spacing:.25em;padding:10px 32px;cursor:pointer;transition:all .4s;backdrop-filter:blur(6px)}
+  #btn:hover{background:rgba(167,139,250,0.08);border-color:rgba(167,139,250,0.7);color:#a78bfa;box-shadow:0 0 24px rgba(167,139,250,0.15)}
+  #btn.active{border-color:rgba(56,189,248,0.5);color:rgba(56,189,248,0.9)}
+  #key-display{color:rgba(253,230,138,0.6);font-size:12px;letter-spacing:.4em;text-transform:uppercase;min-height:16px;transition:opacity .4s;font-style:italic}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="key-display"></div>
+  <button id="btn">Begin</button>
+  <div id="label">fluid resonance</div>
+</div>
+<script>
+// ── WebGL ─────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+
+const vsSource = `
+  attribute vec2 a_pos;
+  void main(){ gl_Position = vec4(a_pos,0.0,1.0); }
+`;
+
+// 9 geometric SDFs — continuously morphing between current and next shape
+const fsSource = `
+  precision highp float;
+  uniform vec2  u_res;
+  uniform float u_time;
+  uniform float u_energy;
+  uniform float u_bass;
+  uniform float u_mid;
+  uniform float u_high;
+  uniform vec3  u_noteColor;
+  uniform float u_shapeIdx;      // current geometry (0-8)
+  uniform float u_shapeIdxNext;  // next geometry (0-8)
+  uniform float u_shapeProgress; // 0=current, 1=next (advances through chord)
+  uniform float u_shapeBlend;    // 0=full fluid, 1=full geometry
+
+  #define PI 3.14159265358979
+
+  // ── Smooth noise — only 3 octaves, no high-freq grain ────────────────────
+  vec3 hash3(vec3 p){
+    p=fract(p*vec3(443.897,441.423,437.195));
+    p+=dot(p,p.yxz+19.19);
+    return fract((p.xxy+p.yzz)*p.zyx);
+  }
+  float noise(vec3 p){
+    vec3 i=floor(p),f=fract(p);
+    f=f*f*(3.0-2.0*f); // cubic smoothstep
+    return mix(
+      mix(mix(dot(hash3(i),f),dot(hash3(i+vec3(1,0,0)),f-vec3(1,0,0)),f.x),
+          mix(dot(hash3(i+vec3(0,1,0)),f-vec3(0,1,0)),dot(hash3(i+vec3(1,1,0)),f-vec3(1,1,0)),f.x),f.y),
+      mix(mix(dot(hash3(i+vec3(0,0,1)),f-vec3(0,0,1)),dot(hash3(i+vec3(1,0,1)),f-vec3(1,0,1)),f.x),
+          mix(dot(hash3(i+vec3(0,1,1)),f-vec3(0,1,1)),dot(hash3(i+vec3(1,1,1)),f-vec3(1,1,1)),f.x),f.y),f.z);
+  }
+  // Only 3 octaves max — keeps surface silky, not rocky
+  float fbm(vec3 p){
+    float v=0.0,a=0.5;
+    for(int i=0;i<3;i++){ v+=a*noise(p); p*=2.01; a*=0.5; }
+    return v;
+  }
+
+  // ── Rotation helpers ──────────────────────────────────────────────────────
+  vec3 rotY(vec3 p,float a){ float c=cos(a),s=sin(a); return vec3(p.x*c+p.z*s,p.y,-p.x*s+p.z*c); }
+  vec3 rotX(vec3 p,float a){ float c=cos(a),s=sin(a); return vec3(p.x,p.y*c-p.z*s,p.y*s+p.z*c); }
+
+  // ── 9 Geometric SDFs ─────────────────────────────────────────────────────
+
+  float sdSphere(vec3 p){ return length(p)-0.72; }
+
+  float sdCube(vec3 p){
+    vec3 q=abs(p)-vec3(0.58);
+    return length(max(q,0.0))+min(max(q.x,max(q.y,q.z)),0.0);
+  }
+
+  float sdCone(vec3 p){
+    float h=0.80, r=0.58;
+    vec2 q=vec2(length(p.xz),p.y+h*0.4);
+    vec2 tip=vec2(0.0,h*0.6); vec2 base=vec2(r,0.0);
+    vec2 ba=base-tip, pa=q-tip;
+    float t2=clamp(dot(pa,ba)/dot(ba,ba),0.0,1.0);
+    return length(pa-ba*t2);
+  }
+
+  float sdTriPrism(vec3 p){
+    float h=0.55, w=0.60;
+    vec3 q=abs(p);
+    return max(q.z-h, max(q.x*0.866+p.y*0.5,-p.y)-w*0.5);
+  }
+
+  float sdCylinder(vec3 p){
+    vec2 d=abs(vec2(length(p.xz),p.y))-vec2(0.50,0.60);
+    return min(max(d.x,d.y),0.0)+length(max(d,0.0));
+  }
+
+  float sdHexPrism(vec3 p){
+    vec3 q=abs(p);
+    return max(q.z-0.55, max(q.x*0.866+q.y*0.5,q.y)-0.60);
+  }
+
+  float sdHemisphere(vec3 p){
+    return max(length(p)-0.72, -p.y);
+  }
+
+  float sdHexPyramid(vec3 p){
+    float h=0.80, r=0.60;
+    vec3 q=p; q.xz=abs(q.xz);
+    float yOff=q.y+h*0.5;
+    float scale=clamp(1.0-yOff/h,0.0,1.0);
+    float hex=max(q.x*0.866+q.z*0.5,q.z)-r*scale;
+    return max(hex,q.y-h*0.5);
+  }
+
+  float sdPentaPrism(vec3 p){
+    float h=0.55, r=0.60;
+    vec2 xz=p.xz;
+    float sector=PI*2.0/5.0;
+    float a=mod(atan(xz.y,xz.x)+sector*0.5,sector)-sector*0.5;
+    float d2=length(xz)*cos(a)-r;
+    float dy=abs(p.y)-h;
+    return min(max(d2,dy),0.0)+length(max(vec2(d2,dy),0.0));
+  }
+
+  float sdGeom(vec3 p, float idx){
+    if(idx<0.5)      return sdSphere(p);
+    else if(idx<1.5) return sdCube(p);
+    else if(idx<2.5) return sdCone(p);
+    else if(idx<3.5) return sdTriPrism(p);
+    else if(idx<4.5) return sdCylinder(p);
+    else if(idx<5.5) return sdHexPrism(p);
+    else if(idx<6.5) return sdHemisphere(p);
+    else if(idx<7.5) return sdHexPyramid(p);
+    else             return sdPentaPrism(p);
+  }
+
+  // ── Smooth fluid blob — silky surface, no grain ───────────────────────────
+  float sdFluid(vec3 p, float t){
+    float r=0.68;
+    // Only large-scale low-frequency undulation — no tiny bumps
+    float disp=0.0;
+    disp += 0.22*fbm(p*1.2 + vec3(t*.028,t*.017,t*.014));
+    disp += 0.12*fbm(p*2.2 - vec3(t*.041,0.0,   t*.029));
+    // Smooth sine-based breathing — gives organic feel without rocky grain
+    disp += 0.10*sin(p.x*1.1+t*.035)*cos(p.y*1.3-t*.028)*sin(p.z*1.0+t*.042);
+    disp += 0.07*sin(p.y*1.4+t*.051)*cos(p.z*1.2+t*.031);
+    // Audio reactivity — smooth, not spiky
+    disp += u_bass  *0.14*fbm(p*1.5 + vec3(0.0,t*.07,0.0));
+    disp += u_energy*0.07*(sin(p.x*3.1+t*.18)*sin(p.y*2.9-t*.21));
+    return length(p)-r-disp;
+  }
+
+  // ── Continuous morphing: current → next geometry over chord duration ──────
+  float sdMain(vec3 p, float t){
+    vec3 rp = rotY(rotX(p, t*0.11), t*0.15);
+
+    float fluid = sdFluid(p, t);
+
+    // Smooth interpolation between two consecutive geometries
+    float gA = sdGeom(rp, u_shapeIdx);
+    float gB = sdGeom(rp, u_shapeIdxNext);
+    // Add subtle breathing to geometry so it never looks dead
+    float breathe = u_energy*0.04*sin(p.x*4.0+t)*sin(p.y*3.8-t*1.1);
+    gA -= breathe; gB -= breathe;
+
+    // Progress through shapes during the chord
+    float prog = smoothstep(0.0,1.0,u_shapeProgress);
+    float geom = mix(gA, gB, prog);
+
+    // Outer blend: fluid ↔ geometry world
+    float b = smoothstep(0.0,1.0,u_shapeBlend);
+    return mix(fluid, geom, b);
+  }
+
+  float march(vec3 ro, vec3 rd, float t){
+    float d=0.0;
+    for(int i=0;i<92;i++){
+      vec3 p=ro+rd*d;
+      float s=sdMain(p,t);
+      if(s<0.001||d>5.5) break;
+      d+=s*0.80;
+    }
+    return d;
+  }
+
+  vec3 getNormal(vec3 p, float t){
+    float e=0.0025;
+    return normalize(vec3(
+      sdMain(p+vec3(e,0,0),t)-sdMain(p-vec3(e,0,0),t),
+      sdMain(p+vec3(0,e,0),t)-sdMain(p-vec3(0,e,0),t),
+      sdMain(p+vec3(0,0,e),t)-sdMain(p-vec3(0,0,e),t)
+    ));
+  }
+
+  void main(){
+    vec2 uv=(gl_FragCoord.xy-0.5*u_res)/min(u_res.x,u_res.y);
+    float camDist=2.3-u_bass*0.13;
+    vec3 ro=vec3(
+      camDist*sin(u_time*0.055),
+      camDist*0.26*sin(u_time*0.038),
+      camDist*cos(u_time*0.055)
+    );
+    vec3 fw=normalize(-ro);
+    vec3 rt=normalize(cross(fw,vec3(0,1,0)));
+    vec3 up=cross(rt,fw);
+    vec3 rd=normalize(fw+uv.x*rt+uv.y*up);
+    float d=march(ro,rd,u_time);
+    vec3 col=vec3(0.015,0.018,0.032);
+    if(d<5.5){
+      vec3 p=ro+rd*d;
+      vec3 n=getNormal(p,u_time);
+      // Smooth iridescent material
+      float iriPhase=dot(n,normalize(vec3(0.6,0.5,0.4)))+u_time*0.07;
+      vec3 iri=0.5+0.5*cos(iriPhase*2.6+vec3(0.0,2.094,4.188));
+      iri=mix(iri,u_noteColor,0.50);
+      vec3 light1=normalize(vec3(1.2,1.5,0.8));
+      vec3 light2=normalize(vec3(-0.7,-0.3,1.0));
+      float diff1=max(dot(n,light1),0.0);
+      float diff2=max(dot(n,light2),0.0)*0.30;
+      // Sharp specular for glassy look
+      float spec=pow(max(dot(n,normalize(light1-rd)),0.0),120.0);
+      float fresnel=pow(1.0-max(dot(n,-rd),0.0),3.0);
+      float sss=pow(max(dot(-rd,light1),0.0),2.0)*0.25;
+      col=vec3(0.06,0.04,0.12);
+      col+=iri*(diff1+diff2)*(0.80+u_energy*0.50);
+      col+=vec3(0.95,0.98,1.0)*spec*(1.1+u_high*1.4); // bright sharp highlights
+      col+=iri*fresnel*(0.70+u_bass*0.85);
+      col+=u_noteColor*sss*(0.50+u_energy*0.50);
+      col+=u_energy*0.06*iri;
+      col=mix(col,vec3(0.015,0.018,0.032),smoothstep(1.0,4.0,d));
+    }
+    // Soft bg nebula
+    col+=fbm(vec3(uv*1.2,u_time*0.012))*0.03*vec3(0.25,0.2,0.6)*(1.0-step(d,5.4));
+    col+=u_energy*0.04*vec3(0.5,0.4,1.0)*exp(-length(uv)*3.0);
+    col*=1.0-smoothstep(0.4,1.3,length(uv));
+    col=col/(col+0.85);
+    col=pow(max(col,0.0),vec3(0.4545));
+    gl_FragColor=vec4(col,1.0);
+  }
+`;
+
+function compile(type,src){
+  const s=gl.createShader(type);
+  gl.shaderSource(s,src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog=gl.createProgram();
+gl.attachShader(prog,compile(gl.VERTEX_SHADER,vsSource));
+gl.attachShader(prog,compile(gl.FRAGMENT_SHADER,fsSource));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog,gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const buf=gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
+const aPos=gl.getAttribLocation(prog,'a_pos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos,2,gl.FLOAT,false,0,0);
+
+const U={};
+['u_res','u_time','u_energy','u_bass','u_mid','u_high','u_noteColor',
+ 'u_shapeIdx','u_shapeIdxNext','u_shapeProgress','u_shapeBlend']
+  .forEach(n=>U[n]=gl.getUniformLocation(prog,n));
+
+function resize(){canvas.width=innerWidth*devicePixelRatio;canvas.height=innerHeight*devicePixelRatio;gl.viewport(0,0,canvas.width,canvas.height);}
+resize(); window.addEventListener('resize',resize);
+
+// ── Audio ──────────────────────────────────────────────────────────────────
+let audioCtx=null,analyser=null,freqData=null;
+let masterGain=null,echoDelay=null;
+let playing=false,arpeggioTimeout=null,currentBPM=108;
+
+function noteFreq(note,oct){
+  const map={C:0,Cs:1,D:2,Ds:3,E:4,F:5,Fs:6,G:7,Gs:8,A:9,As:10,B:11};
+  const semi = map[note];
+  if(semi === undefined){ console.warn('Unknown note:', note); return 440; }
+  return 440*Math.pow(2,((oct-4)*12+semi-9)/12);
+}
+
+function piano(ctx,freq,when,dur,vel){
+  vel=vel||0.7;
+  const g=ctx.createGain();
+  [{m:1,v:1.0},{m:2,v:0.42},{m:3,v:0.26},{m:4,v:0.13},{m:5,v:0.08},{m:6,v:0.055},{m:7,v:0.035},{m:8,v:0.02}]
+  .forEach(function(h){
+    const o=ctx.createOscillator(),og=ctx.createGain();
+    o.type='sine';
+    o.frequency.setValueAtTime(freq*h.m*(1+0.0007*(h.m-1)*(h.m-1)),when);
+    const pk=h.v*vel*0.24;
+    og.gain.setValueAtTime(0,when);
+    og.gain.linearRampToValueAtTime(pk,when+0.007);
+    og.gain.exponentialRampToValueAtTime(0.0001,when+Math.max(dur/(0.35+h.m*0.18),0.04));
+    o.connect(og);og.connect(g);o.start(when);o.stop(when+dur+0.25);
+  });
+  const nb=ctx.createBuffer(1,Math.floor(ctx.sampleRate*0.011),ctx.sampleRate);
+  const nd=nb.getChannelData(0);
+  for(let i=0;i<nd.length;i++) nd[i]=(Math.random()*2-1)*(1-i/nd.length);
+  const ns=ctx.createBufferSource(),ng=ctx.createGain();
+  ns.buffer=nb;ng.gain.setValueAtTime(0.02*vel,when);ng.gain.exponentialRampToValueAtTime(0.0001,when+0.011);
+  ns.connect(ng);ng.connect(g);ns.start(when);
+  g.gain.setValueAtTime(1,when);
+  return g;
+}
+
+async function makeReverb(ctx){
+  const conv=ctx.createConvolver();
+  const sr=ctx.sampleRate, len=sr*6.5;
+  const ir=ctx.createBuffer(2,len,sr);
+  for(let ch=0;ch<2;ch++){
+    const d=ir.getChannelData(ch);
+    for(let i=0;i<len;i++){
+      const t=i/sr;
+      if(t<0.022){d[i]=0;continue;}
+      d[i]=(Math.random()*2-1)*Math.pow(1-i/len,1.35);
+      [0.029,0.043,0.061,0.079,0.097,0.118,0.138,0.162].forEach(rt=>{
+        if(Math.abs(t-rt)<3/sr) d[i]+=(Math.random()*2-1)*0.42;
+      });
+    }
+  }
+  conv.buffer=ir; return conv;
+}
+
+async function initAudio(){
+  audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+  analyser=audioCtx.createAnalyser(); analyser.fftSize=512;
+  freqData=new Uint8Array(analyser.frequencyBinCount);
+
+  const reverb=await makeReverb(audioCtx);
+  masterGain=audioCtx.createGain(); masterGain.gain.value=0.65;
+
+  echoDelay=audioCtx.createDelay(3.0);
+  const echoFb=audioCtx.createGain(), echoWet=audioCtx.createGain(), echoDry=audioCtx.createGain();
+  echoDelay.delayTime.value=0.30;
+  echoFb.gain.value=0.42; echoWet.gain.value=0.32; echoDry.gain.value=1.0;
+  echoDelay.connect(echoFb); echoFb.connect(echoDelay); echoDelay.connect(echoWet);
+
+  const comp=audioCtx.createDynamicsCompressor();
+  comp.threshold.value=-16; comp.knee.value=8; comp.ratio.value=3.5;
+  comp.attack.value=0.003; comp.release.value=0.15;
+
+  const eq=audioCtx.createBiquadFilter();
+  eq.type='highshelf'; eq.frequency.value=4800; eq.gain.value=2.5;
+
+  const revWet=audioCtx.createGain(); revWet.gain.value=0.85;
+  const revDry=audioCtx.createGain(); revDry.gain.value=0.40;
+  const postEcho=audioCtx.createGain();
+
+  masterGain.connect(echoDry); masterGain.connect(echoDelay);
+  echoDry.connect(postEcho); echoWet.connect(postEcho);
+  postEcho.connect(revDry); postEcho.connect(reverb);
+  reverb.connect(revWet);
+  revDry.connect(eq); revWet.connect(eq);
+  eq.connect(comp); comp.connect(analyser); analyser.connect(audioCtx.destination);
+}
+
+
+// ── Musical data ──────────────────────────────────────────────────────────
+// Chord SEQUENCES unchanged. Note pools rebuilt with Fox voicings:
+// chromatic passing tones, upper extensions, blue notes, Lydian color tones.
+// 15 notes per chord spanning octaves 1-5 for full-keyboard runs.
+const progressions = [
+  // Dm9 → G13 → Cmaj9 → Fmaj7
+  [
+    {name:'Dm9',   root:'D',
+     notes:['D','E','F','A','C','E','F','G','A','C','E','F','A','C','E'],
+     octs: [1,  1,  1,  1,  2,  2,  2,  2,  3,  3,  3,  4,  4,  4,  5]},
+    {name:'G13',   root:'G',
+     notes:['G','B','C','D','F','A','B','C','E','F','A','B','D','E','G'],
+     octs: [1,  1,  2,  2,  2,  2,  3,  3,  3,  3,  4,  4,  4,  4,  5]},
+    {name:'Cmaj9', root:'C',
+     notes:['C','E','F','G','B','D','E','Fs','G','B','D','E','G','B','D'],
+     octs: [1,  1,  1,  1,  1,  2,  2,  2,   2,  2,  3,  3,  3,  3,  4]},
+    {name:'Fmaj7', root:'F',
+     notes:['F','G','A','B','C','Ds','E','G','A','B','C','E','G','A','C'],
+     octs: [1,  1,  1,  1,  2,  2,   2,  2,  2,  3,  3,  3,  4,  4,  5]},
+  ],
+  // Ebmaj7 → Ab13 → Dbmaj9 → Gm11
+  [
+    {name:'Ebmaj7',root:'E',
+     notes:['Ds','F','G','As','C','D','F','G','As','D','F','G','As','D','F'],
+     octs: [1,   1,  1,  1,   2,  2,  2,  2,  3,   3,  3,  4,  4,   4,  5]},
+    {name:'Ab13',  root:'A',
+     notes:['Gs','As','C','Ds','F','G','As','C','Ds','F','G','As','C','Ds','G'],
+     octs: [1,   1,   2,  2,   2,  2,  3,   3,  3,   4,  4,  4,   5,  5,   5]},
+    {name:'Dbmaj9',root:'D',
+     notes:['Cs','Ds','F','Gs','As','C','Ds','F','Gs','As','C','Ds','F','Gs','C'],
+     octs: [1,   1,   1,  1,   2,   2,  2,   2,  3,   3,   3,  3,   4,  4,   5]},
+    {name:'Gm11',  root:'G',
+     notes:['G','As','C','D','F','G','As','C','D','F','G','As','C','F','As'],
+     octs: [1,  1,   1,  2,  2,  2,  3,   3,  3,  3,  4,  4,   4,  5,  5]},
+  ],
+  // Am11 → D9 → Gmaj7 → Cmaj7
+  [
+    {name:'Am11',  root:'A',
+     notes:['A','B','C','D','E','G','A','B','C','D','E','G','B','D','E'],
+     octs: [1,  1,  1,  1,  1,  1,  2,  2,  2,  2,  2,  3,  3,  3,  4]},
+    {name:'D9',    root:'D',
+     notes:['D','E','Fs','A','B','C','D','E','Fs','A','C','D','E','Fs','A'],
+     octs: [1,  1,  1,   1,  2,  2,  2,  2,  3,   3,  3,  3,  4,  4,   4]},
+    {name:'Gmaj7', root:'G',
+     notes:['G','A','B','D','E','Fs','G','A','B','D','Fs','G','A','B','D'],
+     octs: [1,  1,  1,  1,  2,  2,   2,  2,  3,  3,  3,   3,  4,  4,  4]},
+    {name:'Cmaj7', root:'C',
+     notes:['C','D','E','F','G','B','C','D','E','Fs','G','B','D','E','G'],
+     octs: [1,  1,  1,  1,  1,  1,  2,  2,  2,  2,   2,  2,  3,  3,  3]},
+  ],
+  // Fm9 → Cm9 → Bbm9 → Ebmaj9
+  [
+    {name:'Fm9',   root:'F',
+     notes:['F','G','As','C','Ds','F','G','As','C','Ds','F','G','As','C','G'],
+     octs: [1,  1,  1,   2,  2,   2,  2,  3,   3,  3,   3,  4,  4,   4,  5]},
+    {name:'Cm9',   root:'C',
+     notes:['C','D','Ds','G','As','C','D','Ds','G','As','C','D','G','As','D'],
+     octs: [1,  1,  1,   1,  2,   2,  2,  2,   2,  3,   3,  3,  3,  4,   4]},
+    {name:'Bbm9',  root:'B',
+     notes:['As','C','Cs','F','Gs','As','C','Cs','F','Gs','As','C','F','Gs','C'],
+     octs: [1,   1,  1,   1,  2,   2,   2,  2,   2,  3,   3,   3,  3,  4,   5]},
+    {name:'Ebmaj9',root:'E',
+     notes:['Ds','F','G','As','C','D','F','G','As','C','D','F','G','As','D'],
+     octs: [1,   1,  1,  1,   2,  2,  2,  3,  3,   3,  3,  4,  4,  4,   5]},
+  ],
+  // Dbmaj7 → Abmaj9 → Bbm11 → Ebsus2
+  [
+    {name:'Dbmaj7',root:'D',
+     notes:['Cs','Ds','F','G','Gs','C','Ds','F','G','Gs','C','Ds','F','Gs','C'],
+     octs: [1,   1,   1,  1,  1,   2,  2,   2,  2,  3,   3,  3,   3,  4,   5]},
+    {name:'Abmaj9',root:'A',
+     notes:['Gs','As','C','Ds','F','G','As','C','Ds','F','G','As','Ds','F','As'],
+     octs: [1,   1,   2,  2,   2,  2,  3,   3,  3,   3,  4,  4,   4,  5,   5]},
+    {name:'Bbm11', root:'B',
+     notes:['As','C','Cs','Ds','F','Gs','As','C','Cs','F','Gs','As','Cs','F','As'],
+     octs: [1,   1,  1,   1,   2,  2,   2,   2,  2,   3,  3,   3,   4,  4,   5]},
+    {name:'Ebsus2',root:'E',
+     notes:['Ds','F','G','As','C','Ds','F','G','As','C','Ds','F','As','Ds','F'],
+     octs: [1,   1,  1,  1,   2,  2,   2,  3,  3,   3,  4,   4,  4,   5,  5]},
+  ],
+  // Emaj7 → C#m9 → Amaj9 → F#m11
+  [
+    {name:'Emaj7', root:'E',
+     notes:['E','Fs','Gs','As','B','Cs','Ds','E','Fs','Gs','B','Cs','Ds','Fs','B'],
+     octs: [1,  1,   1,   1,   1,  2,   2,   2,  2,   2,   3,  3,   3,   4,   4]},
+    {name:'C#m9',  root:'C',
+     notes:['Cs','Ds','E','Fs','Gs','As','B','Cs','Ds','E','Gs','As','B','Ds','Gs'],
+     octs: [1,   1,   1,  1,   1,   2,   2,  2,   2,   2,  3,   3,   3,  4,   4]},
+    {name:'Amaj9', root:'A',
+     notes:['A','B','Cs','Ds','E','Fs','Gs','A','B','Cs','E','Fs','Gs','B','E'],
+     octs: [1,  1,  1,   1,   1,  2,   2,   2,  2,  3,   3,  3,   3,  4,  4]},
+    {name:'F#m11', root:'F',
+     notes:['Fs','Gs','A','B','Cs','Ds','E','Fs','Gs','A','Cs','Ds','E','Gs','Cs'],
+     octs: [1,   1,   1,  1,  2,   2,   2,  2,   2,   3,  3,   3,   3,  4,   4]},
+  ],
+];
+
+// ── Elijah Fox impressionistic arpeggio patterns ──────────────────────────
+// All index into 15-note chord pools (indices 0-14).
+// Fox techniques:
+//   Rapid scalar runs, "waterfall" descents, call-and-response bass/treble,
+//   rhythmic displacement (5+7+3), tremolo-then-burst, chromatic scatter,
+//   impressionist broken chords with unexpected leaps, rubato phrasing.
+const patterns = [
+  // "Ravel waterfall" — fast descent from top, then scattered ascent
+  [14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,
+   0,3,6,9,12, 1,4,7,10,13, 2,5,8,11,14,
+   14,12,10,8,6,4,2,0, 13,11,9,7,5,3,1],
+
+  // "Fox call-response" — bass punch + treble answer (his signature)
+  [0,1,0,2,0, 14,13,12,11, 0,3,0,4, 13,12,11,10,
+   0,0,5,6,0, 14,13,10,  0,7,8,   12,11,9,
+   0,1,2,3,4, 14,13,12,11,10],
+
+  // "Displaced shimmer" — 5+5+5 Fox rhythmic displacement
+  [0,2,4,6,8,  10,12,14,11,9,  7,5,3,1,13,
+   0,4,8,12,3,  7,11,14,6,10,  2,5,9,13,1,
+   0,6,12,5,11, 4,10,3,9,14],
+
+  // "Chromatic cascade" — stepwise, all 15 notes
+  [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,
+   14,13,11,9,7,5,3,1,
+   0,2,5,8,11,14,10,6,2,13,9,5,1,12,7,3],
+
+  // "Tremolo burst" — Fox rapid-repeat then explosive run
+  [7,7,7,8,7,8,9, 14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,
+   0,0,0,1,0,1,2, 0,3,6,9,12,14,10,7,4,1,13,9,5,2],
+
+  // "Fox impressionist scatter" — wide leaps, never linear
+  [0,14,1,13,2,12,3,11,4,10,5,9,6,8,7,
+   0,12,3,14,1,11,4,13,2,10,5,9,6,8,7,
+   14,0,13,1,12,2,11,3,10,4,9,5,8,6,7],
+
+  // "Ascending shimmer run" — Fox concert-style sweep
+  [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,
+   12,9,6,3,0,13,10,7,4,1,14,11,8,5,2,
+   0,2,4,6,8,10,12,14,11,9,7,5,3,1,0],
+
+  // "Pentatonic ghost" — ghost notes on 0,1 + loud upper register
+  [0,0,9,14,0,0,11,13,0,10,12,0,
+   0,1,8,14,1,0,9,13,0,7,12,1,0,
+   14,12,10,9,0,14,11,9,0,1,13,10,7],
+
+  // "Fox rubato" — long irregular phrase, rhythmically free
+  [0,3,7,11,14, 14,13,11,9,7,5,3,1,0,
+   0,4,9,13, 13,11,8,6,3,1,
+   0,2,5,8,11,14, 12,8,4,1,13,9,5,2,0],
+];
+
+
+// Root letter → shader letter index (A=0..G=6)
+const rootToLetter = {A:0,B:1,C:2,D:3,E:4,F:5,G:6};
+
+const noteColors={
+  C:[1.0,0.35,0.35],Cs:[1.0,0.5,0.25],D:[1.0,0.72,0.25],Ds:[0.9,0.95,0.15],
+  E:[0.5,1.0,0.25],F:[0.1,0.95,0.5],Fs:[0.1,0.88,0.85],G:[0.15,0.55,1.0],
+  Gs:[0.35,0.35,1.0],A:[0.7,0.25,1.0],As:[1.0,0.25,0.85],B:[1.0,0.25,0.5],
+};
+
+const GEOM_NAMES = ['sphere','cube','cone','tri prism','cylinder','hex prism','hemisphere','hex pyramid','penta prism'];
+
+// Sequence of all 9 shapes — each chord advances one step
+let geomSequence = [0,1,2,3,4,5,6,7,8,0,1,2,3,4,5,6,7,8];
+let geomSeqIdx = 0;
+
+// ── Shape morph state — continuous morphing through chord duration ─────────
+let shapeIdx     = 0;   // current geometry
+let shapeIdxNext = 1;   // geometry we're morphing toward
+let shapeProgress = 0.0; // 0→1 over chord duration, drives morph
+let shapeProgressTarget = 0.0;
+let shapeBlend   = 0.8; // start with some geometry visible
+let shapeBlendTarget = 0.85;
+// Chord start/end times for linear progress
+let chordStartTime = 0;
+let chordDuration  = 4.0; // seconds, updated when chord changes
+
+function advanceShape(){
+  // Current "next" becomes new "current", pick new next
+  shapeIdx     = shapeIdxNext;
+  geomSeqIdx   = (geomSeqIdx+1) % geomSequence.length;
+  shapeIdxNext = geomSequence[(geomSeqIdx+1) % geomSequence.length];
+  shapeProgress = 0.0; // restart the morph
+  chordStartTime = performance.now() * 0.001;
+}
+
+// ── Arpeggio ──────────────────────────────────────────────────────────────
+let targetNoteColor=[0.5,0.4,1.0];
+const keyDisplay=document.getElementById('key-display');
+let lastChordName='';
+
+function scheduleArpeggio(){
+  let progIdx=Math.floor(Math.random()*progressions.length);
+  let prog=progressions[progIdx];
+  let patIdx=Math.floor(Math.random()*patterns.length);
+  let chordIdx=0, noteIdx=0, notesInChord=0;
+
+  // Fox BPM: medium swing, enough room to breathe and sprint
+  const bpms=[96,100,108,112,116];
+  currentBPM = bpms[Math.floor(Math.random()*bpms.length)];
+  if(echoDelay) echoDelay.delayTime.setTargetAtTime((60/currentBPM)*0.75, audioCtx.currentTime, 0.08);
+
+  let t = audioCtx.currentTime + 0.04;
+
+  // Fox phrase state — determines current rhythmic character
+  let phraseType = 0; // 0=normal, 1=burst run, 2=sparse+ghost, 3=tremolo
+  let phraseNotesLeft = 0;
+
+  function batch(n){
+    for(let b=0;b<n;b++){
+      if(!playing) return;
+
+      const chord = prog[chordIdx];
+      const pat   = patterns[patIdx];
+      const ni    = pat[noteIdx % pat.length] % chord.notes.length;
+      const name  = chord.notes[ni];
+      const oct   = chord.octs[ni];
+      const freq  = noteFreq(name, oct);
+
+      // ── Phrase type cycling — Fox changes character every 8-16 notes ──
+      if(phraseNotesLeft <= 0){
+        phraseType = Math.floor(Math.random()*4);
+        phraseNotesLeft = 7 + Math.floor(Math.random()*9); // 7-15 notes per phrase
+      }
+      phraseNotesLeft--;
+
+      // ── Step size: Fox uses irregular 16th/32nd/dotted rhythms ──
+      let step;
+      const beat16 = (60/currentBPM)*0.25; // 16th note
+      const beat8  = beat16*2;
+      const beat32 = beat16*0.5;
+
+      if(phraseType === 1){
+        // Burst run — rapid 32nd notes, very fast shimmer
+        step = beat32 * (0.9 + Math.random()*0.2);
+      } else if(phraseType === 2){
+        // Sparse — slow, breathing, dotted notes with rests
+        step = beat8 * (1.3 + Math.random()*0.7);
+        // Occasional actual rest (skip a step)
+        if(Math.random()<0.22){
+          t += beat8 * (0.8 + Math.random()*0.6);
+        }
+      } else if(phraseType === 3){
+        // Tremolo feel — very fast then suddenly dotted
+        step = Math.random()<0.6 ? beat32 : beat8*(1+Math.random());
+      } else {
+        // Normal swing 16ths with Fox triplet feel
+        const swingFactor = (noteIdx%2===0) ? 1.08 : 0.92;
+        step = beat16 * swingFactor * (0.88 + Math.random()*0.24);
+      }
+      const humanize = (Math.random()-0.5)*0.011;
+
+      // ── Fox dynamics: very wide range ──
+      let vel;
+      const pos = noteIdx % 16;
+      if(phraseType === 1){
+        // Burst: mostly medium with a few loud accents
+        vel = Math.random()<0.2 ? 0.85+Math.random()*0.15 : 0.35+Math.random()*0.35;
+      } else if(phraseType === 2){
+        // Sparse: big dynamic contrasts — very quiet ghosts, very loud accents
+        vel = Math.random()<0.3 ? 0.08+Math.random()*0.10 : 0.72+Math.random()*0.28;
+      } else if(phraseType === 3){
+        // Tremolo: consistent medium-loud
+        vel = 0.50 + Math.random()*0.30;
+      } else {
+        if(pos===0)              vel = 0.88+Math.random()*0.12;
+        else if(pos===8)         vel = 0.70+Math.random()*0.14;
+        else if(pos===4||pos===12) vel = 0.55+Math.random()*0.20;
+        else if(Math.random()<0.18) vel = 0.08+Math.random()*0.10; // ghost
+        else                     vel = 0.28+Math.random()*0.34;
+      }
+
+      // ── Note duration: Fox sustains some notes, clips others ──
+      const durMult = phraseType===1 ? 0.9 :
+                      phraseType===2 ? 2.8+Math.random()*1.5 :
+                      phraseType===3 ? 1.1 :
+                      (Math.random()<0.12 ? 3.5 : Math.random()<0.25 ? 2.0 : 1.5);
+
+      // ── Chromatic grace note — Fox's chromatic approach ──
+      if(Math.random()<0.14){
+        const semis = Math.random()<0.65 ? -1 : 1; // mostly from below
+        const gf = freq * Math.pow(2, semis/12);
+        const gt = piano(audioCtx, gf, t-0.028, 0.040, vel*0.28);
+        gt.connect(masterGain);
+      }
+
+      // ── Octave doubling for body (Fox plays parallel octaves) ──
+      if(Math.random()<0.10){
+        const ot = piano(audioCtx, freq*2, t+humanize, step*durMult*0.85, vel*0.22);
+        ot.connect(masterGain);
+      }
+
+      // ── Occasional 5th below for quartal richness ──
+      if(phraseType===2 && Math.random()<0.15){
+        const ft = piano(audioCtx, freq*0.749, t+humanize, step*durMult, vel*0.18);
+        ft.connect(masterGain);
+      }
+
+      const tone = piano(audioCtx, freq, t+humanize, step*durMult, vel);
+      tone.connect(masterGain);
+
+      const schedDelay = Math.max(0,(t-audioCtx.currentTime)*1000);
+      const nc = noteColors[name] || [0.5,0.4,1.0];
+      setTimeout(()=>{ targetNoteColor=nc; }, schedDelay);
+
+      t += step;
+      noteIdx++; notesInChord++;
+
+      // Chord changes every 16-24 notes (longer for Fox's extended vamps)
+      const npc = 16 + Math.floor(Math.random()*9);
+      if(notesInChord >= npc){
+        notesInChord = 0;
+        chordIdx = (chordIdx+1) % prog.length;
+        const chord2 = prog[chordIdx];
+        const cn = chord2.name;
+
+        setTimeout(()=>{
+          if(cn !== lastChordName){
+            lastChordName = cn;
+            const geomName = GEOM_NAMES[shapeIdxNext];
+            keyDisplay.textContent = cn + '  ·  ' + geomName;
+            keyDisplay.style.opacity = '1';
+            setTimeout(()=>keyDisplay.style.opacity='0.4', 1200);
+            // chord duration estimate for morph pacing
+            chordDuration = npc * (60/currentBPM) * 0.45;
+            advanceShape();
+          }
+        }, Math.max(0,(t-audioCtx.currentTime)*1000));
+
+        if(chordIdx===0){
+          progIdx = (progIdx+1+Math.floor(Math.random()*(progressions.length-1))) % progressions.length;
+          prog = progressions[progIdx];
+          patIdx = (patIdx+1+Math.floor(Math.random()*(patterns.length-1))) % patterns.length;
+          currentBPM = bpms[Math.floor(Math.random()*bpms.length)];
+          if(echoDelay) echoDelay.delayTime.setTargetAtTime((60/currentBPM)*0.75,audioCtx.currentTime,0.12);
+        }
+      }
+    }
+    const next = Math.max(0,(t-audioCtx.currentTime-0.30)*1000);
+    if(playing) arpeggioTimeout = setTimeout(()=>batch(28), next);
+  }
+  batch(28);
+}
+
+// ── Render loop ───────────────────────────────────────────────────────────
+let t0=null, lastTs=0;
+let renderEnergy=0, renderBass=0, renderMid=0, renderHigh=0;
+let renderColor=[0.5,0.4,1.0];
+
+function audioLevels(){
+  if(!analyser||!freqData) return{energy:0,bass:0,mid:0,high:0};
+  analyser.getByteFrequencyData(freqData);
+  const n=freqData.length;
+  const be=Math.floor(n*.05), me=Math.floor(n*.35);
+  let bass=0,mid=0,high=0;
+  for(let i=0;i<be;i++) bass+=freqData[i];
+  for(let i=be;i<me;i++) mid+=freqData[i];
+  for(let i=me;i<n;i++) high+=freqData[i];
+  return{
+    energy:(bass/(be*255))*.5+(mid/((me-be)*255))*.3+(high/((n-me)*255))*.2,
+    bass:bass/(be*255), mid:mid/((me-be)*255), high:high/((n-me)*255)
+  };
+}
+
+function lerp(a,b,t){return a+(b-a)*t;}
+function lerpV(a,b,t){return[lerp(a[0],b[0],t),lerp(a[1],b[1],t),lerp(a[2],b[2],t)];}
+
+function render(ts){
+  requestAnimationFrame(render);
+  if(!t0){t0=ts;lastTs=ts;}
+  const t=(ts-t0)*0.001;
+  const dt=Math.min((ts-lastTs)*0.001,0.05);
+  lastTs=ts;
+
+  // Continuously advance shape progress over chord duration
+  if(playing && chordDuration > 0){
+    const elapsed = performance.now()*0.001 - chordStartTime;
+    shapeProgress = Math.min(elapsed / chordDuration, 1.0);
+  }
+
+  // Shape blend stays high — geometry always visible, just morphing
+  shapeBlend = lerp(shapeBlend, shapeBlendTarget, Math.min(dt*3.0, 0.08));
+
+  const lv=audioLevels();
+  renderColor  = lerpV(renderColor, targetNoteColor, 0.05);
+  renderEnergy = lerp(renderEnergy, playing?lv.energy:0, 0.09);
+  renderBass   = lerp(renderBass,   playing?lv.bass:0,   0.09);
+  renderMid    = lerp(renderMid,    playing?lv.mid:0,    0.09);
+  renderHigh   = lerp(renderHigh,   playing?lv.high:0,   0.09);
+
+  gl.uniform2f(U.u_res,canvas.width,canvas.height);
+  gl.uniform1f(U.u_time,t);
+  gl.uniform1f(U.u_energy,renderEnergy);
+  gl.uniform1f(U.u_bass,renderBass);
+  gl.uniform1f(U.u_mid,renderMid);
+  gl.uniform1f(U.u_high,renderHigh);
+  gl.uniform3f(U.u_noteColor,renderColor[0],renderColor[1],renderColor[2]);
+  gl.uniform1f(U.u_shapeIdx,shapeIdx);
+  gl.uniform1f(U.u_shapeIdxNext,shapeIdxNext);
+  gl.uniform1f(U.u_shapeProgress,shapeProgress);
+  gl.uniform1f(U.u_shapeBlend,shapeBlend);
+
+  gl.drawArrays(gl.TRIANGLES,0,6);
+}
+requestAnimationFrame(render);
+
+// ── UI ────────────────────────────────────────────────────────────────────
+const btn=document.getElementById('btn');
+btn.addEventListener('click',async function(){
+  if(!playing){
+    playing=true; btn.textContent='Pause'; btn.classList.add('active');
+    if(!audioCtx) await initAudio();
+    else if(audioCtx.state==='suspended') await audioCtx.resume();
+    scheduleArpeggio();
+  } else {
+    playing=false; btn.textContent='Begin'; btn.classList.remove('active');
+    if(arpeggioTimeout) clearTimeout(arpeggioTimeout);
+    if(audioCtx) audioCtx.suspend();
+  }
+});
+</script>
+</body>
+</html>
