@@ -403,63 +403,58 @@ function noteFreq(note, oct) {
   return 440 * Math.pow(2, ((oct-4)*12 + s - 9) / 12);
 }
 
-// Grand piano tone — 8 harmonics with inharmonicity, velocity brightness, string body
+// Grand piano tone — rich low end, velocity-sensitive, long sustain on bass
 function piano(ctx, freq, when, dur, vel) {
   vel = Math.max(0.01, Math.min(1, vel || 0.6));
   const g = ctx.createGain();
 
-  // Inharmonicity coefficient — higher partials stretch slightly (real piano strings)
-  const B = 0.00015;
-  // Velocity shapes brightness — harder hits have stronger upper harmonics
-  const brightBoost = 0.5 + vel * 1.0;
+  // Low notes get a sustain bonus — bass notes ring much longer
+  const octaveBonus = Math.max(1.0, 3.0 - freq / 200); // e.g. C2=~65Hz gets ~2.7x
+  const effectiveDur = dur * octaveBonus;
 
-  [{m:1,v:1.00},{m:2,v:0.50},{m:3,v:0.28},{m:4,v:0.14},
-   {m:5,v:0.08},{m:6,v:0.05},{m:7,v:0.03},{m:8,v:0.015}]
+  const B = 0.00015;
+  // Brightness: low notes stay warm even at lower velocities
+  const brightBoost = 0.6 + vel * 0.8;
+
+  [{m:1,v:1.00},{m:2,v:0.52},{m:3,v:0.30},{m:4,v:0.16},
+   {m:5,v:0.09},{m:6,v:0.055},{m:7,v:0.03},{m:8,v:0.016}]
   .forEach(h => {
     const o = ctx.createOscillator(), og = ctx.createGain();
     o.type = 'sine';
-    // Inharmonic frequency: f_n = n*f0 * sqrt(1 + B*n^2)
     const inharmonic = freq * h.m * Math.sqrt(1 + B * h.m * h.m);
     o.frequency.setValueAtTime(inharmonic, when);
 
-    // Higher harmonics are brighter with velocity
-    const harmonicVel = h.m <= 2 ? 1.0 : brightBoost;
-    const pk = h.v * vel * 0.20 * harmonicVel;
+    const harmonicVel = h.m <= 3 ? 1.0 : brightBoost;
+    const pk = h.v * vel * 0.23 * harmonicVel;
     og.gain.setValueAtTime(0, when);
     og.gain.linearRampToValueAtTime(pk, when + 0.008);
 
-    // Each harmonic decays at its own rate (high partials faster — real piano)
-    const decayBase = dur * 1.8;
-    const decay = Math.max(decayBase / (0.28 + h.m * 0.14), 0.08);
+    const decay = Math.max(effectiveDur * 1.8 / (0.25 + h.m * 0.12), 0.12);
     og.gain.exponentialRampToValueAtTime(0.0001, when + decay);
 
     o.connect(og); og.connect(g);
-    o.start(when); o.stop(when + decay + 0.15);
+    o.start(when); o.stop(when + decay + 0.2);
   });
 
-  // String sympathetic resonance — very slight pitch beating on fundamental
-  // (two closely-detuned strings per note, like a real grand)
+  // Dual-string beating (richer on low notes)
   const o2 = ctx.createOscillator(), og2 = ctx.createGain();
   o2.type = 'sine';
-  o2.frequency.setValueAtTime(freq * 1.0004, when); // 0.7¢ detune
-  const pk2 = vel * 0.12;
+  o2.frequency.setValueAtTime(freq * 1.0004, when);
+  const pk2 = vel * 0.14;
   og2.gain.setValueAtTime(0, when);
   og2.gain.linearRampToValueAtTime(pk2, when + 0.009);
-  og2.gain.exponentialRampToValueAtTime(0.0001, when + Math.max(dur * 1.9, 0.2));
+  og2.gain.exponentialRampToValueAtTime(0.0001, when + effectiveDur * 2.0);
   o2.connect(og2); og2.connect(g);
-  o2.start(when); o2.stop(when + dur * 2.1);
+  o2.start(when); o2.stop(when + effectiveDur * 2.2);
 
-  // Hammer strike — bandpass filtered noise for wood/felt impact character
+  // Hammer click
   const nb = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.018), ctx.sampleRate);
   const nd = nb.getChannelData(0);
   for (let i = 0; i < nd.length; i++) nd[i] = (Math.random()*2-1) * Math.pow(1-i/nd.length, 1.5);
   const ns = ctx.createBufferSource();
   ns.buffer = nb;
-  // Bandpass around the strike frequency for tonal click
   const bp = ctx.createBiquadFilter();
-  bp.type = 'bandpass';
-  bp.frequency.value = freq * 3;
-  bp.Q.value = 0.8;
+  bp.type = 'bandpass'; bp.frequency.value = freq * 3; bp.Q.value = 0.8;
   const ng = ctx.createGain();
   ng.gain.setValueAtTime(0.022 * vel, when);
   ng.gain.exponentialRampToValueAtTime(0.0001, when + 0.018);
@@ -686,14 +681,24 @@ function scheduleArpeggio() {
 
       const humanize = (Math.random()-0.5) * 0.014;
 
-      // Velocity: impressionistic dynamics — accents on certain beats, ghosts elsewhere
+      // Velocity — bass notes (low pattern index) always full voice
       const pos = noteIdx % 12;
+      const isLow = ni <= 2; // first 3 notes of chord pool = bass register
       let vel;
-      if      (pos === 0)                vel = 0.72 + Math.random()*0.20;
-      else if (pos === 6)                vel = 0.58 + Math.random()*0.22;
-      else if (pos === 3 || pos === 9)   vel = 0.45 + Math.random()*0.22;
-      else if (Math.random() < 0.12)     vel = 0.14 + Math.random()*0.10; // ghost
-      else                               vel = 0.30 + Math.random()*0.28;
+      if (isLow) {
+        // Bass notes: always warm and present, no ghosts
+        vel = 0.65 + Math.random() * 0.28;
+      } else if (pos === 0) {
+        vel = 0.72 + Math.random() * 0.20;
+      } else if (pos === 6) {
+        vel = 0.55 + Math.random() * 0.22;
+      } else if (pos === 3 || pos === 9) {
+        vel = 0.42 + Math.random() * 0.22;
+      } else if (Math.random() < 0.08) {   // fewer ghosts
+        vel = 0.18 + Math.random() * 0.10;
+      } else {
+        vel = 0.32 + Math.random() * 0.28;
+      }
 
       const dur = step * (1.5 + Math.random()*0.8); // sustain notes long
 
