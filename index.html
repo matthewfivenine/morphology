@@ -2,772 +2,683 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Fluid Resonance</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;1,300&display=swap');
-  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-  html,body{width:100%;height:100%;background:#04060f;overflow:hidden;font-family:'Cormorant Garamond',serif}
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;background:#02060e;overflow:hidden;font-family:'Cormorant Garamond',serif}
   canvas{display:block;position:fixed;top:0;left:0;width:100%;height:100%}
-  #ui{position:fixed;bottom:40px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:14px;z-index:10;pointer-events:none}
-  #label{color:rgba(255,255,255,0.12);font-size:11px;letter-spacing:.35em;text-transform:uppercase;font-style:italic}
-  #btn{pointer-events:all;background:transparent;border:1px solid rgba(167,139,250,0.35);color:rgba(167,139,250,0.85);font-family:'Cormorant Garamond',serif;font-size:13px;font-style:italic;letter-spacing:.25em;padding:10px 32px;cursor:pointer;transition:all .4s;backdrop-filter:blur(6px)}
-  #btn:hover{background:rgba(167,139,250,0.08);border-color:rgba(167,139,250,0.7);color:#a78bfa;box-shadow:0 0 24px rgba(167,139,250,0.15)}
-  #btn.active{border-color:rgba(56,189,248,0.5);color:rgba(56,189,248,0.9)}
-  #key-display{color:rgba(253,230,138,0.6);font-size:12px;letter-spacing:.4em;text-transform:uppercase;min-height:16px;transition:opacity .4s;font-style:italic}
+  #ui{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:12px;z-index:10;pointer-events:none}
+  #chord{color:rgba(180,210,255,0.45);font-size:11px;letter-spacing:.4em;text-transform:uppercase;min-height:14px;font-style:italic;transition:opacity .5s}
+  #btn{pointer-events:all;background:transparent;border:1px solid rgba(120,160,220,0.30);color:rgba(140,180,240,0.80);font-family:'Cormorant Garamond',serif;font-size:13px;font-style:italic;letter-spacing:.22em;padding:9px 30px;cursor:pointer;transition:all .4s}
+  #btn:hover{background:rgba(120,160,220,0.07);border-color:rgba(120,160,220,0.6);color:#8ab4f0}
+  #btn.on{border-color:rgba(100,200,255,0.45);color:rgba(100,200,255,0.85)}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="ui">
-  <div id="key-display"></div>
+  <div id="chord"></div>
   <button id="btn">Begin</button>
-  <div id="label">fluid resonance</div>
 </div>
 <script>
-// ── WebGL ─────────────────────────────────────────────────────────────────
+// ── WebGL water ripple ─────────────────────────────────────────────────────
 const canvas = document.getElementById('c');
 const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
 
-const vsSource = `
-  attribute vec2 a_pos;
-  void main(){ gl_Position = vec4(a_pos,0.0,1.0); }
-`;
+// Two ping-pong textures for wave simulation
+let texW, texH;
+let fboA, fboB, texA, texB; // ping-pong
+let fboC, texC;              // display (color composite)
+let pingPong = 0;
 
-// 9 geometric SDFs — continuously morphing between current and next shape
-const fsSource = `
-  precision highp float;
-  uniform vec2  u_res;
-  uniform float u_time;
-  uniform float u_energy;
-  uniform float u_bass;
-  uniform float u_mid;
-  uniform float u_high;
-  uniform vec3  u_noteColor;
-  uniform float u_shapeIdx;      // current geometry (0-8)
-  uniform float u_shapeIdxNext;  // next geometry (0-8)
-  uniform float u_shapeProgress; // 0=current, 1=next (advances through chord)
-  uniform float u_shapeBlend;    // 0=full fluid, 1=full geometry
+function resize() {
+  const dpr = Math.min(devicePixelRatio, 1.5);
+  canvas.width  = Math.floor(innerWidth  * dpr);
+  canvas.height = Math.floor(innerHeight * dpr);
+  // Wave sim runs on a SQUARE buffer so ripples are always circular
+  const sim = Math.min(canvas.width, canvas.height);
+  texW = sim;
+  texH = sim;
+  initTextures();
+}
 
-  #define PI 3.14159265358979
+function mkTex(w, h, data) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
 
-  // ── Smooth noise — only 3 octaves, no high-freq grain ────────────────────
-  vec3 hash3(vec3 p){
-    p=fract(p*vec3(443.897,441.423,437.195));
-    p+=dot(p,p.yxz+19.19);
-    return fract((p.xxy+p.yzz)*p.zyx);
-  }
-  float noise(vec3 p){
-    vec3 i=floor(p),f=fract(p);
-    f=f*f*(3.0-2.0*f); // cubic smoothstep
-    return mix(
-      mix(mix(dot(hash3(i),f),dot(hash3(i+vec3(1,0,0)),f-vec3(1,0,0)),f.x),
-          mix(dot(hash3(i+vec3(0,1,0)),f-vec3(0,1,0)),dot(hash3(i+vec3(1,1,0)),f-vec3(1,1,0)),f.x),f.y),
-      mix(mix(dot(hash3(i+vec3(0,0,1)),f-vec3(0,0,1)),dot(hash3(i+vec3(1,0,1)),f-vec3(1,0,1)),f.x),
-          mix(dot(hash3(i+vec3(0,1,1)),f-vec3(0,1,1)),dot(hash3(i+vec3(1,1,1)),f-vec3(1,1,1)),f.x),f.y),f.z);
-  }
-  // Only 3 octaves max — keeps surface silky, not rocky
-  float fbm(vec3 p){
-    float v=0.0,a=0.5;
-    for(int i=0;i<3;i++){ v+=a*noise(p); p*=2.01; a*=0.5; }
-    return v;
-  }
+function mkFbo(tex) {
+  const f = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return f;
+}
 
-  // ── Rotation helpers ──────────────────────────────────────────────────────
-  vec3 rotY(vec3 p,float a){ float c=cos(a),s=sin(a); return vec3(p.x*c+p.z*s,p.y,-p.x*s+p.z*c); }
-  vec3 rotX(vec3 p,float a){ float c=cos(a),s=sin(a); return vec3(p.x,p.y*c-p.z*s,p.y*s+p.z*c); }
+function initTextures() {
+  [texA, texB, texC].forEach(t => { if(t) gl.deleteTexture(t); });
+  [fboA, fboB, fboC].forEach(f => { if(f) gl.deleteFramebuffer(f); });
+  texA = mkTex(texW, texH, null);
+  texB = mkTex(texW, texH, null);
+  texC = mkTex(texW, texH, null);
+  fboA = mkFbo(texA);
+  fboB = mkFbo(texB);
+  fboC = mkFbo(texC);
+  // Clear both wave buffers
+  [fboA, fboB].forEach(f => {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+  });
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
 
-  // ── 9 Geometric SDFs ─────────────────────────────────────────────────────
-
-  float sdSphere(vec3 p){ return length(p)-0.72; }
-
-  float sdCube(vec3 p){
-    vec3 q=abs(p)-vec3(0.58);
-    return length(max(q,0.0))+min(max(q.x,max(q.y,q.z)),0.0);
-  }
-
-  float sdCone(vec3 p){
-    float h=0.80, r=0.58;
-    vec2 q=vec2(length(p.xz),p.y+h*0.4);
-    vec2 tip=vec2(0.0,h*0.6); vec2 base=vec2(r,0.0);
-    vec2 ba=base-tip, pa=q-tip;
-    float t2=clamp(dot(pa,ba)/dot(ba,ba),0.0,1.0);
-    return length(pa-ba*t2);
-  }
-
-  float sdTriPrism(vec3 p){
-    float h=0.55, w=0.60;
-    vec3 q=abs(p);
-    return max(q.z-h, max(q.x*0.866+p.y*0.5,-p.y)-w*0.5);
-  }
-
-  float sdCylinder(vec3 p){
-    vec2 d=abs(vec2(length(p.xz),p.y))-vec2(0.50,0.60);
-    return min(max(d.x,d.y),0.0)+length(max(d,0.0));
-  }
-
-  float sdHexPrism(vec3 p){
-    vec3 q=abs(p);
-    return max(q.z-0.55, max(q.x*0.866+q.y*0.5,q.y)-0.60);
-  }
-
-  float sdHemisphere(vec3 p){
-    return max(length(p)-0.72, -p.y);
-  }
-
-  float sdHexPyramid(vec3 p){
-    float h=0.80, r=0.60;
-    vec3 q=p; q.xz=abs(q.xz);
-    float yOff=q.y+h*0.5;
-    float scale=clamp(1.0-yOff/h,0.0,1.0);
-    float hex=max(q.x*0.866+q.z*0.5,q.z)-r*scale;
-    return max(hex,q.y-h*0.5);
-  }
-
-  float sdPentaPrism(vec3 p){
-    float h=0.55, r=0.60;
-    vec2 xz=p.xz;
-    float sector=PI*2.0/5.0;
-    float a=mod(atan(xz.y,xz.x)+sector*0.5,sector)-sector*0.5;
-    float d2=length(xz)*cos(a)-r;
-    float dy=abs(p.y)-h;
-    return min(max(d2,dy),0.0)+length(max(vec2(d2,dy),0.0));
-  }
-
-  float sdGeom(vec3 p, float idx){
-    if(idx<0.5)      return sdSphere(p);
-    else if(idx<1.5) return sdCube(p);
-    else if(idx<2.5) return sdCone(p);
-    else if(idx<3.5) return sdTriPrism(p);
-    else if(idx<4.5) return sdCylinder(p);
-    else if(idx<5.5) return sdHexPrism(p);
-    else if(idx<6.5) return sdHemisphere(p);
-    else if(idx<7.5) return sdHexPyramid(p);
-    else             return sdPentaPrism(p);
-  }
-
-  // ── Smooth fluid blob — silky surface, no grain ───────────────────────────
-  float sdFluid(vec3 p, float t){
-    float r=0.68;
-    // Only large-scale low-frequency undulation — no tiny bumps
-    float disp=0.0;
-    disp += 0.22*fbm(p*1.2 + vec3(t*.028,t*.017,t*.014));
-    disp += 0.12*fbm(p*2.2 - vec3(t*.041,0.0,   t*.029));
-    // Smooth sine-based breathing — gives organic feel without rocky grain
-    disp += 0.10*sin(p.x*1.1+t*.035)*cos(p.y*1.3-t*.028)*sin(p.z*1.0+t*.042);
-    disp += 0.07*sin(p.y*1.4+t*.051)*cos(p.z*1.2+t*.031);
-    // Audio reactivity — smooth, not spiky
-    disp += u_bass  *0.14*fbm(p*1.5 + vec3(0.0,t*.07,0.0));
-    disp += u_energy*0.07*(sin(p.x*3.1+t*.18)*sin(p.y*2.9-t*.21));
-    return length(p)-r-disp;
-  }
-
-  // ── Continuous morphing: current → next geometry over chord duration ──────
-  float sdMain(vec3 p, float t){
-    vec3 rp = rotY(rotX(p, t*0.11), t*0.15);
-
-    float fluid = sdFluid(p, t);
-
-    // Smooth interpolation between two consecutive geometries
-    float gA = sdGeom(rp, u_shapeIdx);
-    float gB = sdGeom(rp, u_shapeIdxNext);
-    // Add subtle breathing to geometry so it never looks dead
-    float breathe = u_energy*0.04*sin(p.x*4.0+t)*sin(p.y*3.8-t*1.1);
-    gA -= breathe; gB -= breathe;
-
-    // Progress through shapes during the chord
-    float prog = smoothstep(0.0,1.0,u_shapeProgress);
-    float geom = mix(gA, gB, prog);
-
-    // Outer blend: fluid ↔ geometry world
-    float b = smoothstep(0.0,1.0,u_shapeBlend);
-    return mix(fluid, geom, b);
-  }
-
-  float march(vec3 ro, vec3 rd, float t){
-    float d=0.0;
-    for(int i=0;i<92;i++){
-      vec3 p=ro+rd*d;
-      float s=sdMain(p,t);
-      if(s<0.001||d>5.5) break;
-      d+=s*0.80;
-    }
-    return d;
-  }
-
-  vec3 getNormal(vec3 p, float t){
-    float e=0.0025;
-    return normalize(vec3(
-      sdMain(p+vec3(e,0,0),t)-sdMain(p-vec3(e,0,0),t),
-      sdMain(p+vec3(0,e,0),t)-sdMain(p-vec3(0,e,0),t),
-      sdMain(p+vec3(0,0,e),t)-sdMain(p-vec3(0,0,e),t)
-    ));
-  }
-
-  void main(){
-    vec2 uv=(gl_FragCoord.xy-0.5*u_res)/min(u_res.x,u_res.y);
-    float camDist=2.3-u_bass*0.13;
-    vec3 ro=vec3(
-      camDist*sin(u_time*0.055),
-      camDist*0.26*sin(u_time*0.038),
-      camDist*cos(u_time*0.055)
-    );
-    vec3 fw=normalize(-ro);
-    vec3 rt=normalize(cross(fw,vec3(0,1,0)));
-    vec3 up=cross(rt,fw);
-    vec3 rd=normalize(fw+uv.x*rt+uv.y*up);
-    float d=march(ro,rd,u_time);
-    vec3 col=vec3(0.015,0.018,0.032);
-    if(d<5.5){
-      vec3 p=ro+rd*d;
-      vec3 n=getNormal(p,u_time);
-      // Smooth iridescent material
-      float iriPhase=dot(n,normalize(vec3(0.6,0.5,0.4)))+u_time*0.07;
-      vec3 iri=0.5+0.5*cos(iriPhase*2.6+vec3(0.0,2.094,4.188));
-      iri=mix(iri,u_noteColor,0.50);
-      vec3 light1=normalize(vec3(1.2,1.5,0.8));
-      vec3 light2=normalize(vec3(-0.7,-0.3,1.0));
-      float diff1=max(dot(n,light1),0.0);
-      float diff2=max(dot(n,light2),0.0)*0.30;
-      // Sharp specular for glassy look
-      float spec=pow(max(dot(n,normalize(light1-rd)),0.0),120.0);
-      float fresnel=pow(1.0-max(dot(n,-rd),0.0),3.0);
-      float sss=pow(max(dot(-rd,light1),0.0),2.0)*0.25;
-      col=vec3(0.06,0.04,0.12);
-      col+=iri*(diff1+diff2)*(0.80+u_energy*0.50);
-      col+=vec3(0.95,0.98,1.0)*spec*(1.1+u_high*1.4); // bright sharp highlights
-      col+=iri*fresnel*(0.70+u_bass*0.85);
-      col+=u_noteColor*sss*(0.50+u_energy*0.50);
-      col+=u_energy*0.06*iri;
-      col=mix(col,vec3(0.015,0.018,0.032),smoothstep(1.0,4.0,d));
-    }
-    // Soft bg nebula
-    col+=fbm(vec3(uv*1.2,u_time*0.012))*0.03*vec3(0.25,0.2,0.6)*(1.0-step(d,5.4));
-    col+=u_energy*0.04*vec3(0.5,0.4,1.0)*exp(-length(uv)*3.0);
-    col*=1.0-smoothstep(0.4,1.3,length(uv));
-    col=col/(col+0.85);
-    col=pow(max(col,0.0),vec3(0.4545));
-    gl_FragColor=vec4(col,1.0);
-  }
-`;
-
-function compile(type,src){
-  const s=gl.createShader(type);
-  gl.shaderSource(s,src); gl.compileShader(s);
-  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+// Compile shader helper
+function sh(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
   return s;
 }
-const prog=gl.createProgram();
-gl.attachShader(prog,compile(gl.VERTEX_SHADER,vsSource));
-gl.attachShader(prog,compile(gl.FRAGMENT_SHADER,fsSource));
-gl.linkProgram(prog);
-if(!gl.getProgramParameter(prog,gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(prog));
-gl.useProgram(prog);
-
-const buf=gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER,buf);
-gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
-const aPos=gl.getAttribLocation(prog,'a_pos');
-gl.enableVertexAttribArray(aPos);
-gl.vertexAttribPointer(aPos,2,gl.FLOAT,false,0,0);
-
-const U={};
-['u_res','u_time','u_energy','u_bass','u_mid','u_high','u_noteColor',
- 'u_shapeIdx','u_shapeIdxNext','u_shapeProgress','u_shapeBlend']
-  .forEach(n=>U[n]=gl.getUniformLocation(prog,n));
-
-function resize(){canvas.width=innerWidth*devicePixelRatio;canvas.height=innerHeight*devicePixelRatio;gl.viewport(0,0,canvas.width,canvas.height);}
-resize(); window.addEventListener('resize',resize);
-
-// ── Audio ──────────────────────────────────────────────────────────────────
-let audioCtx=null,analyser=null,freqData=null;
-let masterGain=null,echoDelay=null;
-let playing=false,arpeggioTimeout=null,currentBPM=108;
-
-function noteFreq(note,oct){
-  const map={C:0,Cs:1,D:2,Ds:3,E:4,F:5,Fs:6,G:7,Gs:8,A:9,As:10,B:11};
-  const semi = map[note];
-  if(semi === undefined){ console.warn('Unknown note:', note); return 440; }
-  return 440*Math.pow(2,((oct-4)*12+semi-9)/12);
+function prog(vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, sh(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  return p;
 }
 
-function piano(ctx,freq,when,dur,vel){
-  vel=vel||0.7;
-  const g=ctx.createGain();
-  [{m:1,v:1.0},{m:2,v:0.42},{m:3,v:0.26},{m:4,v:0.13},{m:5,v:0.08},{m:6,v:0.055},{m:7,v:0.035},{m:8,v:0.02}]
-  .forEach(function(h){
-    const o=ctx.createOscillator(),og=ctx.createGain();
-    o.type='sine';
-    o.frequency.setValueAtTime(freq*h.m*(1+0.0007*(h.m-1)*(h.m-1)),when);
-    const pk=h.v*vel*0.24;
-    og.gain.setValueAtTime(0,when);
-    og.gain.linearRampToValueAtTime(pk,when+0.007);
-    og.gain.exponentialRampToValueAtTime(0.0001,when+Math.max(dur/(0.35+h.m*0.18),0.04));
-    o.connect(og);og.connect(g);o.start(when);o.stop(when+dur+0.25);
+const vsQ = `attribute vec2 a; void main(){ gl_Position=vec4(a,0,1); }`;
+
+// ── Wave simulation shader ─────────────────────────────────────────────────
+// Stores height in R, previous height in G
+const fsWave = `
+precision mediump float;
+uniform sampler2D uCurr;
+uniform vec2 uRes;
+uniform vec2 uDrop;
+uniform float uDropAmp;
+uniform float uDropR;
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / uRes;
+  float px = 1.0 / uRes.x;
+  float py = 1.0 / uRes.y;
+
+  float c  = texture2D(uCurr, uv).r;
+  float cp = texture2D(uCurr, uv).g;
+  float l  = texture2D(uCurr, uv - vec2(px,0)).r;
+  float r  = texture2D(uCurr, uv + vec2(px,0)).r;
+  float u  = texture2D(uCurr, uv + vec2(0,py)).r;
+  float d  = texture2D(uCurr, uv - vec2(0,py)).r;
+
+  // Also sample 2-step neighbors for smoother, wider wave propagation
+  float l2 = texture2D(uCurr, uv - vec2(px*2.0,0)).r;
+  float r2 = texture2D(uCurr, uv + vec2(px*2.0,0)).r;
+  float u2 = texture2D(uCurr, uv + vec2(0,py*2.0)).r;
+  float d2 = texture2D(uCurr, uv - vec2(0,py*2.0)).r;
+
+  // Standard wave equation with higher propagation constant for larger ripples
+  float laplacian = l + r + u + d - 4.0*c;
+  // Wider stencil adds smooth long-wavelength component
+  float laplacian2 = (l2 + r2 + u2 + d2 - 4.0*c) * 0.18;
+
+  float k = 0.492;
+  float next = 2.0*c - cp + k*(laplacian + laplacian2);
+
+  // Less damping = waves flow further, feel more like real water
+  next *= 0.996;
+
+  // Add drop — correct for spherical UV stretch so splash is circular
+  if(uDrop.x >= 0.0){
+    // Drop position is in planar UV [0,1]x[0,1] — no aspect correction needed
+    vec2 uvDiff = (gl_FragCoord.xy / uRes) - uDrop;
+    float dist = length(uvDiff) * uRes.x;
+    float t2 = clamp(1.0 - dist / uDropR, 0.0, 1.0);
+    float splash = uDropAmp * 0.5 * (1.0 + cos(3.14159 * (1.0 - t2)));
+    next += splash;
+  }
+
+  gl_FragColor = vec4(clamp(next,-1.0,1.0), c, 0.0, 1.0);
+}`;
+
+// ── Display / composite shader — sphere surface with reflective iridescence ─
+const fsDisplay = `
+precision mediump float;
+uniform sampler2D uWave;
+uniform vec2  uRes;     // square wave buffer dimensions
+uniform vec2  uScreen;  // actual canvas dimensions
+uniform float uTime;
+uniform vec3  uChordColor;
+uniform vec3  uNoteColor;
+
+#define PI 3.14159265
+
+void main(){
+  vec2 fc = gl_FragCoord.xy;
+
+  // ── Sphere ray-intersection using SCREEN aspect ────────────────────────
+  vec2 screenUV = fc / uScreen;
+  float aspect = uScreen.x / uScreen.y;
+  vec2 ndc = (screenUV * 2.0 - 1.0) * vec2(aspect, 1.0);
+
+  // Camera sits above the sphere, slightly off-axis for perspective depth
+  vec3 camPos = vec3(0.0, 0.0, 2.4);
+  vec3 rayDir = normalize(vec3(ndc * 0.55, -1.0));
+
+  // Sphere intersection
+  float sphereR = 1.0;
+  float a = dot(rayDir, rayDir);
+  float b = 2.0*dot(camPos, rayDir);
+  float c2 = dot(camPos, camPos) - sphereR*sphereR;
+  float disc = b*b - 4.0*a*c2;
+
+  if(disc < 0.0){
+    // Outside sphere — deep background
+    vec3 bg = vec3(0.008, 0.010, 0.020);
+    gl_FragColor = vec4(bg, 1.0);
+    return;
+  }
+
+  float t2 = (-b - sqrt(disc)) / (2.0*a);
+  vec3 hit = camPos + rayDir * t2;   // point on sphere surface
+  vec3 sphereN = normalize(hit);     // outward sphere normal
+
+  // ── Map sphere surface to wave texture UV ─────────────────────────────
+  // Use planar (orthographic) projection of sphere normal onto XY plane.
+  // This maps the sphere face directly — no longitude/latitude stretch.
+  // sphereN.xy goes from -1..1 at the limb; remap to 0..1 UV.
+  vec2 sphUV = sphereN.xy * 0.5 + 0.5;
+  sphUV = clamp(sphUV, 0.001, 0.999);
+
+  // Equal pixel steps in both axes — no aspect correction needed
+  float px = 1.0/uRes.x;
+  float py = 1.0/uRes.y;
+  float stepX = px * 3.0;
+  float stepY = py * 3.0;
+  float hL = texture2D(uWave, sphUV-vec2(stepX,0)).r;
+  float hR = texture2D(uWave, sphUV+vec2(stepX,0)).r;
+  float hD = texture2D(uWave, sphUV-vec2(0,stepY)).r;
+  float hU = texture2D(uWave, sphUV+vec2(0,stepY)).r;
+  float hC = texture2D(uWave, sphUV).r;
+
+  // Wave gradient in planar UV space — dpdx=world X, dpdy=world Y
+  vec3 dpdx = vec3(1.0, 0.0, 0.0);
+  vec3 dpdy = vec3(0.0, 1.0, 0.0);
+  vec3 wavePerturb = ((hL-hR)*dpdx + (hD-hU)*dpdy) * 4.5;
+
+  // Perturbed normal — sphere normal + wave displacement
+  vec3 n = normalize(sphereN + wavePerturb * 0.55);
+
+  // ── View & reflection ──────────────────────────────────────────────────
+  vec3 V = normalize(camPos - hit);  // view direction from surface
+  vec3 R = reflect(-V, n);           // reflection direction
+
+  // ── Procedural environment map ─────────────────────────────────────────
+  // Map R to a neon environment: dark zenith, vivid equatorial bands
+  float envLon   = atan(R.x, R.z);
+  float envLat   = asin(clamp(R.y, -1.0, 1.0));
+
+  // Phase driven by chord color shift and time (slow)
+  float phase = envLon + uTime*0.04;
+  // Bands cycle through chord color → its complement
+  vec3 bandA = uChordColor;
+  vec3 bandB = vec3(1.0) - uChordColor * 0.6 + vec3(0.0, 0.05, 0.15);
+
+  // Latitude-weighted mix: equator is vivid, poles are dark
+  float latW = cos(envLat);  // 1 at equator, 0 at poles
+  float bandMix = 0.5 + 0.5*sin(phase * 2.8 + envLat * 1.5);
+  vec3 envBand  = mix(bandA, bandB, bandMix) * latW;
+
+  // Dark pole
+  vec3 envPole  = vec3(0.015, 0.010, 0.025);
+  vec3 envColor = mix(envPole, envBand * 0.55, latW * latW);
+
+  // ── Fresnel ────────────────────────────────────────────────────────────
+  float cosV    = max(dot(n, V), 0.0);
+  float fresnel = pow(1.0 - cosV, 2.5);
+  // More Fresnel on ripple slopes
+  fresnel = clamp(fresnel + smoothstep(0.0,0.08,abs(hC))*0.4, 0.0, 1.0);
+
+  vec3 reflection = envColor * fresnel * 1.6;
+
+  // ── Iridescent thin-film (oil on water surface) ────────────────────────
+  float opd = (1.0 - cosV) * 5.5
+            + sphUV.x * 1.2 + sphUV.y * 0.9
+            + uTime * 0.05      // very slow drift
+            + hC * 3.5;
+
+  vec3 irid = vec3(
+    0.5+0.5*sin(opd*4.0+0.0),
+    0.5+0.5*sin(opd*4.0+2.094),
+    0.5+0.5*sin(opd*4.0+4.188)
+  );
+  float filmStr = smoothstep(0.0, 0.22, 1.0-cosV)
+                + smoothstep(0.0, 0.07, abs(hC)) * 0.65;
+  vec3 film = irid * clamp(filmStr, 0.0, 1.0) * 0.26;
+
+  // ── Specular highlights ────────────────────────────────────────────────
+  vec3 l1 = normalize(vec3(0.5, 0.8, 1.5));
+  vec3 l2 = normalize(vec3(-0.7, 0.3, 1.2));
+  float s1 = pow(max(dot(n,l1),0.0), 90.0);
+  float s2 = pow(max(dot(n,l2),0.0), 50.0);
+  vec3 spec = vec3(0.60, 0.20, 1.0)*s1*0.85 + vec3(0.05,0.85,1.0)*s2*0.65;
+  // Chord color tints specular
+  spec = mix(spec, uChordColor*1.3, 0.22);
+
+  // ── Ripple crest glow ─────────────────────────────────────────────────
+  float crest = smoothstep(0.02, 0.22, hC);
+  // Use note color for per-drop glow (bright, fast)
+  vec3 crestGlow = mix(uChordColor*0.8, uNoteColor, 0.6) * crest * 0.20;
+
+  // ── Limb darkening — sphere edges darker, physically correct ──────────
+  float limb = pow(cosV, 0.5);  // bright at center, dark at edges
+
+  // ── Compose ───────────────────────────────────────────────────────────
+  vec3 base = vec3(0.010, 0.012, 0.024);
+  vec3 col = (base + reflection + film + spec + crestGlow) * limb;
+
+  // Tonemap
+  col = col / (col + 0.58);
+  col = pow(max(col, 0.0), vec3(0.4545));
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+// Build programs
+const pWave    = prog(vsQ, fsWave);
+const pDisplay = prog(vsQ, fsDisplay);
+
+// Quad buffer
+const quadBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]), gl.STATIC_DRAW);
+
+function bindQuad(p) {
+  const a = gl.getAttribLocation(p, 'a');
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.enableVertexAttribArray(a);
+  gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
+}
+
+// Uniform helpers
+const U = (p,n) => gl.getUniformLocation(p,n);
+
+// Drop queue — notes schedule drops here
+const dropQueue = [];
+let currentDrop = [-1,-1];
+let currentDropAmp = 0;
+let currentDropR   = 20;
+
+// Water tint state — neon note colors
+let noteColor  = [0.4, 0.2, 1.0];
+let targetNoteColor  = [0.4, 0.2, 1.0];
+let chordColor = [0.4, 0.2, 1.0];
+let targetChordColor = [0.4, 0.2, 1.0];
+
+// ── Render ─────────────────────────────────────────────────────────────────
+let t0 = null;
+function lerp(a,b,t){return a+(b-a)*t}
+function lerpV(a,b,t){return a.map((v,i)=>lerp(v,b[i],t))}
+
+function render(ts) {
+  requestAnimationFrame(render);
+  if (!t0) t0 = ts;
+  const time = (ts - t0) * 0.001;
+
+  // noteColor: fast per-note flash; chordColor: very slow chord-only shift
+  noteColor  = lerpV(noteColor,  targetNoteColor,  0.12);  // fast flash
+  chordColor = lerpV(chordColor, targetChordColor, 0.008); // very slow drift
+
+  // Process next drop from queue
+  if (dropQueue.length > 0) {
+    const d = dropQueue.shift();
+    currentDrop = d.pos;
+    currentDropAmp = d.amp;
+    currentDropR   = d.r;
+  } else {
+    currentDrop = [-1,-1];
+  }
+
+  gl.viewport(0, 0, texW, texH);
+
+  // ── Step 1: advance wave simulation ──
+  const srcTex = pingPong === 0 ? texA : texB;
+  const dstFbo = pingPong === 0 ? fboB : fboA;
+
+  gl.useProgram(pWave);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, dstFbo);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, srcTex);
+  gl.uniform1i(U(pWave,'uCurr'), 0);
+  gl.uniform2f(U(pWave,'uRes'), texW, texH);
+  gl.uniform2f(U(pWave,'uDrop'), currentDrop[0], currentDrop[1]);
+  gl.uniform1f(U(pWave,'uDropAmp'), currentDropAmp);
+  gl.uniform1f(U(pWave,'uDropR'), currentDropR);
+  bindQuad(pWave);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  pingPong = 1 - pingPong;
+
+  // ── Step 2: render to screen ──
+  const waveTex = pingPong === 0 ? texA : texB;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.useProgram(pDisplay);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, waveTex);
+  gl.uniform1i(U(pDisplay,'uWave'), 0);
+  gl.uniform2f(U(pDisplay,'uRes'),    texW, texH);           // square wave buffer
+  gl.uniform2f(U(pDisplay,'uScreen'), canvas.width, canvas.height); // actual screen
+  gl.uniform1f(U(pDisplay,'uTime'), time);
+  gl.uniform3f(U(pDisplay,'uChordColor'), chordColor[0], chordColor[1], chordColor[2]);
+  gl.uniform3f(U(pDisplay,'uNoteColor'),  noteColor[0],  noteColor[1],  noteColor[2]);
+  bindQuad(pDisplay);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+}
+
+resize();
+window.addEventListener('resize', resize);
+requestAnimationFrame(render);
+
+// ── Audio ──────────────────────────────────────────────────────────────────
+let audioCtx = null, analyser = null;
+let masterGain = null, echoDelay = null;
+let playing = false, arpeggioTimeout = null, currentBPM = 80;
+
+function noteFreq(note, oct) {
+  const map = {C:0,Cs:1,D:2,Ds:3,E:4,F:5,Fs:6,G:7,Gs:8,A:9,As:10,B:11};
+  const s = map[note];
+  if (s === undefined) return 440;
+  return 440 * Math.pow(2, ((oct-4)*12 + s - 9) / 12);
+}
+
+// Warm piano tone — fewer harmonics, long sustain, soft attack
+function piano(ctx, freq, when, dur, vel) {
+  vel = Math.max(0.01, Math.min(1, vel || 0.6));
+  const g = ctx.createGain();
+  // 5 harmonics, warm balance
+  [{m:1,v:1.0},{m:2,v:0.38},{m:3,v:0.18},{m:4,v:0.08},{m:5,v:0.04}]
+  .forEach(h => {
+    const o = ctx.createOscillator(), og = ctx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(freq * h.m * (1 + 0.0005*(h.m-1)*(h.m-1)), when);
+    const pk = h.v * vel * 0.22;
+    og.gain.setValueAtTime(0, when);
+    og.gain.linearRampToValueAtTime(pk, when + 0.010);
+    // Long warm decay for impressionist sustain
+    const decay = Math.max(dur * 1.6 / (0.3 + h.m * 0.15), 0.1);
+    og.gain.exponentialRampToValueAtTime(0.0001, when + decay);
+    o.connect(og); og.connect(g);
+    o.start(when); o.stop(when + decay + 0.1);
   });
-  const nb=ctx.createBuffer(1,Math.floor(ctx.sampleRate*0.011),ctx.sampleRate);
-  const nd=nb.getChannelData(0);
-  for(let i=0;i<nd.length;i++) nd[i]=(Math.random()*2-1)*(1-i/nd.length);
-  const ns=ctx.createBufferSource(),ng=ctx.createGain();
-  ns.buffer=nb;ng.gain.setValueAtTime(0.02*vel,when);ng.gain.exponentialRampToValueAtTime(0.0001,when+0.011);
-  ns.connect(ng);ng.connect(g);ns.start(when);
-  g.gain.setValueAtTime(1,when);
+  // Soft hammer noise
+  const nb = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.012), ctx.sampleRate);
+  const nd = nb.getChannelData(0);
+  for (let i = 0; i < nd.length; i++) nd[i] = (Math.random()*2-1)*(1-i/nd.length)*0.7;
+  const ns = ctx.createBufferSource(), ng = ctx.createGain();
+  ns.buffer = nb;
+  ng.gain.setValueAtTime(0.015 * vel, when);
+  ng.gain.exponentialRampToValueAtTime(0.0001, when + 0.012);
+  ns.connect(ng); ng.connect(g); ns.start(when);
+  g.gain.setValueAtTime(1, when);
   return g;
 }
 
-async function makeReverb(ctx){
-  const conv=ctx.createConvolver();
-  const sr=ctx.sampleRate, len=sr*6.5;
-  const ir=ctx.createBuffer(2,len,sr);
-  for(let ch=0;ch<2;ch++){
-    const d=ir.getChannelData(ch);
-    for(let i=0;i<len;i++){
-      const t=i/sr;
-      if(t<0.022){d[i]=0;continue;}
-      d[i]=(Math.random()*2-1)*Math.pow(1-i/len,1.35);
-      [0.029,0.043,0.061,0.079,0.097,0.118,0.138,0.162].forEach(rt=>{
-        if(Math.abs(t-rt)<3/sr) d[i]+=(Math.random()*2-1)*0.42;
+async function makeReverb(ctx) {
+  const conv = ctx.createConvolver();
+  const sr = ctx.sampleRate, len = sr * 5.5;
+  const ir = ctx.createBuffer(2, len, sr);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = ir.getChannelData(ch);
+    for (let i = 0; i < len; i++) {
+      const t = i / sr;
+      if (t < 0.020) { d[i] = 0; continue; }
+      d[i] = (Math.random()*2-1) * Math.pow(1 - i/len, 1.4);
+      [0.031,0.050,0.071,0.093,0.117].forEach(rt => {
+        if (Math.abs(t-rt) < 3/sr) d[i] += (Math.random()*2-1)*0.38;
       });
     }
   }
-  conv.buffer=ir; return conv;
+  conv.buffer = ir; return conv;
 }
 
-async function initAudio(){
-  audioCtx=new(window.AudioContext||window.webkitAudioContext)();
-  analyser=audioCtx.createAnalyser(); analyser.fftSize=512;
-  freqData=new Uint8Array(analyser.frequencyBinCount);
+async function initAudio() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  masterGain = audioCtx.createGain(); masterGain.gain.value = 0.68;
 
-  const reverb=await makeReverb(audioCtx);
-  masterGain=audioCtx.createGain(); masterGain.gain.value=0.65;
+  const reverb = await makeReverb(audioCtx);
 
-  echoDelay=audioCtx.createDelay(3.0);
-  const echoFb=audioCtx.createGain(), echoWet=audioCtx.createGain(), echoDry=audioCtx.createGain();
-  echoDelay.delayTime.value=0.30;
-  echoFb.gain.value=0.42; echoWet.gain.value=0.32; echoDry.gain.value=1.0;
+  echoDelay = audioCtx.createDelay(3.0);
+  const echoFb  = audioCtx.createGain();
+  const echoWet = audioCtx.createGain();
+  const echoDry = audioCtx.createGain();
+  echoDelay.delayTime.value = 0.36;
+  echoFb.gain.value  = 0.38;
+  echoWet.gain.value = 0.28;
+  echoDry.gain.value = 1.0;
   echoDelay.connect(echoFb); echoFb.connect(echoDelay); echoDelay.connect(echoWet);
 
-  const comp=audioCtx.createDynamicsCompressor();
-  comp.threshold.value=-16; comp.knee.value=8; comp.ratio.value=3.5;
-  comp.attack.value=0.003; comp.release.value=0.15;
+  const comp = audioCtx.createDynamicsCompressor();
+  comp.threshold.value = -18; comp.knee.value = 8; comp.ratio.value = 3;
+  comp.attack.value = 0.004; comp.release.value = 0.20;
 
-  const eq=audioCtx.createBiquadFilter();
-  eq.type='highshelf'; eq.frequency.value=4800; eq.gain.value=2.5;
+  const eq = audioCtx.createBiquadFilter();
+  eq.type = 'highshelf'; eq.frequency.value = 5000; eq.gain.value = 2;
 
-  const revWet=audioCtx.createGain(); revWet.gain.value=0.85;
-  const revDry=audioCtx.createGain(); revDry.gain.value=0.40;
-  const postEcho=audioCtx.createGain();
+  const revWet = audioCtx.createGain(); revWet.gain.value = 0.80;
+  const revDry = audioCtx.createGain(); revDry.gain.value = 0.42;
+  const post   = audioCtx.createGain();
 
   masterGain.connect(echoDry); masterGain.connect(echoDelay);
-  echoDry.connect(postEcho); echoWet.connect(postEcho);
-  postEcho.connect(revDry); postEcho.connect(reverb);
+  echoDry.connect(post); echoWet.connect(post);
+  post.connect(revDry); post.connect(reverb);
   reverb.connect(revWet);
   revDry.connect(eq); revWet.connect(eq);
-  eq.connect(comp); comp.connect(analyser); analyser.connect(audioCtx.destination);
+  eq.connect(comp); comp.connect(audioCtx.destination);
 }
 
-
-// ── Musical data ──────────────────────────────────────────────────────────
-// Chord SEQUENCES unchanged. Note pools rebuilt with Fox voicings:
-// chromatic passing tones, upper extensions, blue notes, Lydian color tones.
-// 15 notes per chord spanning octaves 1-5 for full-keyboard runs.
+// ── Musical data — Elijah Fox style ───────────────────────────────────────
+// Chord progressions, tight octave range 3-5, impressionistic voicings
 const progressions = [
   // Dm9 → G13 → Cmaj9 → Fmaj7
   [
-    {name:'Dm9',   root:'D',
-     notes:['D','E','F','A','C','E','F','G','A','C','E','F','A','C','E'],
-     octs: [1,  1,  1,  1,  2,  2,  2,  2,  3,  3,  3,  4,  4,  4,  5]},
-    {name:'G13',   root:'G',
-     notes:['G','B','C','D','F','A','B','C','E','F','A','B','D','E','G'],
-     octs: [1,  1,  2,  2,  2,  2,  3,  3,  3,  3,  4,  4,  4,  4,  5]},
-    {name:'Cmaj9', root:'C',
-     notes:['C','E','F','G','B','D','E','Fs','G','B','D','E','G','B','D'],
-     octs: [1,  1,  1,  1,  1,  2,  2,  2,   2,  2,  3,  3,  3,  3,  4]},
-    {name:'Fmaj7', root:'F',
-     notes:['F','G','A','B','C','Ds','E','G','A','B','C','E','G','A','C'],
-     octs: [1,  1,  1,  1,  2,  2,   2,  2,  2,  3,  3,  3,  4,  4,  5]},
+    {name:'Dm9',    notes:['C','D','F','A','E','C','D','F','A'],        octs:[3,3,3,3,4,4,4,4,4]},
+    {name:'G13',    notes:['B','D','F','A','E','B','D','F','G'],        octs:[3,3,3,3,4,4,4,4,4]},
+    {name:'Cmaj9',  notes:['B','C','E','G','D','B','C','E','G'],        octs:[3,4,4,4,5,4,5,5,5]},
+    {name:'Fmaj7',  notes:['A','C','E','F','B','A','C','E','F'],        octs:[3,4,4,4,4,4,5,5,5]},
   ],
   // Ebmaj7 → Ab13 → Dbmaj9 → Gm11
   [
-    {name:'Ebmaj7',root:'E',
-     notes:['Ds','F','G','As','C','D','F','G','As','D','F','G','As','D','F'],
-     octs: [1,   1,  1,  1,   2,  2,  2,  2,  3,   3,  3,  4,  4,   4,  5]},
-    {name:'Ab13',  root:'A',
-     notes:['Gs','As','C','Ds','F','G','As','C','Ds','F','G','As','C','Ds','G'],
-     octs: [1,   1,   2,  2,   2,  2,  3,   3,  3,   4,  4,  4,   5,  5,   5]},
-    {name:'Dbmaj9',root:'D',
-     notes:['Cs','Ds','F','Gs','As','C','Ds','F','Gs','As','C','Ds','F','Gs','C'],
-     octs: [1,   1,   1,  1,   2,   2,  2,   2,  3,   3,   3,  3,   4,  4,   5]},
-    {name:'Gm11',  root:'G',
-     notes:['G','As','C','D','F','G','As','C','D','F','G','As','C','F','As'],
-     octs: [1,  1,   1,  2,  2,  2,  3,   3,  3,  3,  4,  4,   4,  5,  5]},
+    {name:'Ebmaj7', notes:['Ds','G','As','D','F','Ds','G','As','D'],    octs:[3,3,3,4,4,4,4,4,5]},
+    {name:'Ab13',   notes:['C','Ds','G','F','As','C','Ds','G','As'],    octs:[3,3,3,4,4,4,4,4,5]},
+    {name:'Dbmaj9', notes:['Cs','F','Gs','C','Ds','Cs','F','Gs','C'],   octs:[3,3,3,4,4,4,4,4,5]},
+    {name:'Gm11',   notes:['G','As','D','F','C','G','As','D','F'],      octs:[3,3,4,4,5,4,4,5,5]},
   ],
   // Am11 → D9 → Gmaj7 → Cmaj7
   [
-    {name:'Am11',  root:'A',
-     notes:['A','B','C','D','E','G','A','B','C','D','E','G','B','D','E'],
-     octs: [1,  1,  1,  1,  1,  1,  2,  2,  2,  2,  2,  3,  3,  3,  4]},
-    {name:'D9',    root:'D',
-     notes:['D','E','Fs','A','B','C','D','E','Fs','A','C','D','E','Fs','A'],
-     octs: [1,  1,  1,   1,  2,  2,  2,  2,  3,   3,  3,  3,  4,  4,   4]},
-    {name:'Gmaj7', root:'G',
-     notes:['G','A','B','D','E','Fs','G','A','B','D','Fs','G','A','B','D'],
-     octs: [1,  1,  1,  1,  2,  2,   2,  2,  3,  3,  3,   3,  4,  4,  4]},
-    {name:'Cmaj7', root:'C',
-     notes:['C','D','E','F','G','B','C','D','E','Fs','G','B','D','E','G'],
-     octs: [1,  1,  1,  1,  1,  1,  2,  2,  2,  2,   2,  2,  3,  3,  3]},
+    {name:'Am11',   notes:['A','C','E','G','D','A','C','E','G'],        octs:[3,3,3,3,4,4,4,4,4]},
+    {name:'D9',     notes:['D','Fs','A','C','E','D','Fs','A','C'],      octs:[3,3,3,4,4,4,4,4,5]},
+    {name:'Gmaj7',  notes:['G','B','D','Fs','A','G','B','D','Fs'],      octs:[3,3,4,4,4,4,4,5,5]},
+    {name:'Cmaj7',  notes:['C','E','G','B','D','C','E','G','B'],        octs:[3,3,3,3,4,4,4,4,4]},
   ],
   // Fm9 → Cm9 → Bbm9 → Ebmaj9
   [
-    {name:'Fm9',   root:'F',
-     notes:['F','G','As','C','Ds','F','G','As','C','Ds','F','G','As','C','G'],
-     octs: [1,  1,  1,   2,  2,   2,  2,  3,   3,  3,   3,  4,  4,   4,  5]},
-    {name:'Cm9',   root:'C',
-     notes:['C','D','Ds','G','As','C','D','Ds','G','As','C','D','G','As','D'],
-     octs: [1,  1,  1,   1,  2,   2,  2,  2,   2,  3,   3,  3,  3,  4,   4]},
-    {name:'Bbm9',  root:'B',
-     notes:['As','C','Cs','F','Gs','As','C','Cs','F','Gs','As','C','F','Gs','C'],
-     octs: [1,   1,  1,   1,  2,   2,   2,  2,   2,  3,   3,   3,  3,  4,   5]},
-    {name:'Ebmaj9',root:'E',
-     notes:['Ds','F','G','As','C','D','F','G','As','C','D','F','G','As','D'],
-     octs: [1,   1,  1,  1,   2,  2,  2,  3,  3,   3,  3,  4,  4,  4,   5]},
-  ],
-  // Dbmaj7 → Abmaj9 → Bbm11 → Ebsus2
-  [
-    {name:'Dbmaj7',root:'D',
-     notes:['Cs','Ds','F','G','Gs','C','Ds','F','G','Gs','C','Ds','F','Gs','C'],
-     octs: [1,   1,   1,  1,  1,   2,  2,   2,  2,  3,   3,  3,   3,  4,   5]},
-    {name:'Abmaj9',root:'A',
-     notes:['Gs','As','C','Ds','F','G','As','C','Ds','F','G','As','Ds','F','As'],
-     octs: [1,   1,   2,  2,   2,  2,  3,   3,  3,   3,  4,  4,   4,  5,   5]},
-    {name:'Bbm11', root:'B',
-     notes:['As','C','Cs','Ds','F','Gs','As','C','Cs','F','Gs','As','Cs','F','As'],
-     octs: [1,   1,  1,   1,   2,  2,   2,   2,  2,   3,  3,   3,   4,  4,   5]},
-    {name:'Ebsus2',root:'E',
-     notes:['Ds','F','G','As','C','Ds','F','G','As','C','Ds','F','As','Ds','F'],
-     octs: [1,   1,  1,  1,   2,  2,   2,  3,  3,   3,  4,   4,  4,   5,  5]},
-  ],
-  // Emaj7 → C#m9 → Amaj9 → F#m11
-  [
-    {name:'Emaj7', root:'E',
-     notes:['E','Fs','Gs','As','B','Cs','Ds','E','Fs','Gs','B','Cs','Ds','Fs','B'],
-     octs: [1,  1,   1,   1,   1,  2,   2,   2,  2,   2,   3,  3,   3,   4,   4]},
-    {name:'C#m9',  root:'C',
-     notes:['Cs','Ds','E','Fs','Gs','As','B','Cs','Ds','E','Gs','As','B','Ds','Gs'],
-     octs: [1,   1,   1,  1,   1,   2,   2,  2,   2,   2,  3,   3,   3,  4,   4]},
-    {name:'Amaj9', root:'A',
-     notes:['A','B','Cs','Ds','E','Fs','Gs','A','B','Cs','E','Fs','Gs','B','E'],
-     octs: [1,  1,  1,   1,   1,  2,   2,   2,  2,  3,   3,  3,   3,  4,  4]},
-    {name:'F#m11', root:'F',
-     notes:['Fs','Gs','A','B','Cs','Ds','E','Fs','Gs','A','Cs','Ds','E','Gs','Cs'],
-     octs: [1,   1,   1,  1,  2,   2,   2,  2,   2,   3,  3,   3,   3,  4,   4]},
+    {name:'Fm9',    notes:['F','As','C','Ds','G','F','As','C','Ds'],    octs:[3,3,4,4,4,4,4,5,5]},
+    {name:'Cm9',    notes:['C','Ds','G','As','D','C','Ds','G','As'],    octs:[3,3,3,4,4,4,4,4,5]},
+    {name:'Bbm9',   notes:['As','Cs','F','Gs','C','As','Cs','F','Gs'],  octs:[3,3,3,4,4,4,4,4,5]},
+    {name:'Ebmaj9', notes:['Ds','G','As','D','F','Ds','G','As','D'],    octs:[3,3,3,4,4,4,4,4,5]},
   ],
 ];
 
-// ── Elijah Fox impressionistic arpeggio patterns ──────────────────────────
-// Biased toward mid/low register (indices 0-9 = oct 1-3).
-// High notes (10-14) appear as occasional peaks, not the main voice.
+// Impressionistic patterns — slow, unhurried, with space between phrases
+// Indices 0–8 reference the 9-note chord pool
 const patterns = [
-  // "Ravel waterfall" — starts high then cascades into mid/low warmth
-  [9,8,7,6,5,4,3,2,1,0, 0,2,4,6,8, 1,3,5,7, 0,4,7,3,6,2,5,1,4,0,3],
-
-  // "Fox call-response" — bass punch + mid answer (his signature)
-  [0,1,0,2,0,3, 8,7,6,5, 0,4,0,5, 7,6,5,4,
-   0,2,4,6,8, 7,5,3,1, 0,3,6,9, 8,5,2],
-
-  // "Displaced shimmer" — 5+5+5 Fox rhythmic displacement in mid range
-  [0,2,4,6,8,  6,4,2,0,3,  5,7,9,6,4,
-   0,3,6,9,4,  7,5,2,8,6,  1,4,7,3,5,
-   0,5,8,4,7,  3,6,2,9,5],
-
-  // "Chromatic cascade" — stepwise through mid range
-  [0,1,2,3,4,5,6,7,8,9,
-   9,8,7,6,5,4,3,2,1,0,
-   0,2,4,6,8,7,5,3,1, 0,3,6,9,7,4,2,5,8,6],
-
-  // "Fox tremolo burst" — rapid repeat on mid note then rolling run
-  [4,4,4,5,4,5,6, 9,8,7,6,5,4,3,2,1,0,
-   3,3,3,4,3,4,5, 0,2,5,8,6,3,7,4,1,8,5],
-
-  // "Mid scatter" — wide leaps staying in mid/low zone
-  [0,9,1,8,2,7,3,6,4,5, 0,7,3,9,1,8,4,6,2,5,
-   9,0,8,1,7,2,6,3,5,4],
-
-  // "Ascending mid run" — Fox concert-style sweep through 1-3 octave
-  [0,1,2,3,4,5,6,7,8,9,
-   7,5,3,1,0,8,6,4,2,9,
-   0,2,4,6,8,9,7,5,3,1,0],
-
-  // "Deep groove" — Fox left-hand heavy, low register emphasis
-  [0,0,2,3,0,4,5,0, 6,7,8,5,3,1,0,
-   0,1,0,3,0,5,6,7, 8,6,4,2,0,9,7,5,3,1],
-
-  // "Fox rubato" — flowing irregular phrase in mid range
-  [0,3,5,8,9, 9,8,6,4,2,1,0,
-   0,4,7,9, 8,6,4,2,0,
-   0,2,4,7,9, 8,5,3,1,9,6,4,2,0],
+  // Ascending with inner voice movement
+  [0,2,4,6,8, 7,5,3,1, 0,3,6,8, 5,2,4,7,1,6,3],
+  // Call-and-response: low anchor + upper melody
+  [0,0,4,5,0,6,7, 8,6,4,2, 0,1,3,5,8, 7,4,2,0],
+  // Waterfall descent then gentle rise
+  [8,7,6,5,4,3,2,1,0, 0,2,5,7, 1,3,6,8, 4,2,5],
+  // Fox displacement 5+4+5
+  [0,2,4,6,8, 7,5,3,1, 0,4,7,3, 8,5,2,6, 1,4,7],
+  // Pentatonic shimmer — mostly tones 0,2,4,6,8
+  [0,2,4,6, 8,6,4,2, 0,4,8, 6,2, 0,3,6,8, 5,2,4],
+  // Rubato — uneven phrase lengths
+  [0,1,3,5,8, 8,7,5,3,1,0, 2,5,7, 7,4,2,0, 6,3],
 ];
 
-
-// Root letter → shader letter index (A=0..G=6)
-const rootToLetter = {A:0,B:1,C:2,D:3,E:4,F:5,G:6};
-
-const noteColors={
-  C:[1.0,0.35,0.35],Cs:[1.0,0.5,0.25],D:[1.0,0.72,0.25],Ds:[0.9,0.95,0.15],
-  E:[0.5,1.0,0.25],F:[0.1,0.95,0.5],Fs:[0.1,0.88,0.85],G:[0.15,0.55,1.0],
-  Gs:[0.35,0.35,1.0],A:[0.7,0.25,1.0],As:[1.0,0.25,0.85],B:[1.0,0.25,0.5],
+// Neon note colors — vivid, iridescent, matches the original 3D palette
+const noteColors = {
+  C:  [1.0, 0.35, 0.35],   // hot red
+  Cs: [1.0, 0.50, 0.20],   // orange-red
+  D:  [1.0, 0.72, 0.20],   // amber
+  Ds: [0.9, 0.95, 0.10],   // acid yellow
+  E:  [0.45, 1.0, 0.20],   // lime green
+  F:  [0.05, 0.95, 0.45],  // spring green
+  Fs: [0.05, 0.88, 0.85],  // cyan-teal
+  G:  [0.10, 0.55, 1.0],   // electric blue
+  Gs: [0.35, 0.30, 1.0],   // indigo
+  A:  [0.70, 0.20, 1.0],   // violet
+  As: [1.0,  0.20, 0.85],  // hot pink
+  B:  [1.0,  0.20, 0.45],  // crimson
 };
-
-const GEOM_NAMES = ['sphere','cube','cone','tri prism','cylinder','hex prism','hemisphere','hex pyramid','penta prism'];
-
-// Sequence of all 9 shapes — each chord advances one step
-let geomSequence = [0,1,2,3,4,5,6,7,8,0,1,2,3,4,5,6,7,8];
-let geomSeqIdx = 0;
-
-// ── Shape morph state — continuous morphing through chord duration ─────────
-let shapeIdx     = 0;   // current geometry
-let shapeIdxNext = 1;   // geometry we're morphing toward
-let shapeProgress = 0.0; // 0→1 over chord duration, drives morph
-let shapeProgressTarget = 0.0;
-let shapeBlend   = 0.8; // start with some geometry visible
-let shapeBlendTarget = 0.85;
-// Chord start/end times for linear progress
-let chordStartTime = 0;
-let chordDuration  = 4.0; // seconds, updated when chord changes
-
-function advanceShape(){
-  // Current "next" becomes new "current", pick new next
-  shapeIdx     = shapeIdxNext;
-  geomSeqIdx   = (geomSeqIdx+1) % geomSequence.length;
-  shapeIdxNext = geomSequence[(geomSeqIdx+1) % geomSequence.length];
-  shapeProgress = 0.0; // restart the morph
-  chordStartTime = performance.now() * 0.001;
+function getNoteColor(name) {
+  const root = name.replace('s','').replace('#','');
+  return noteColors[root] || [0.5, 0.4, 1.0];
 }
 
-// ── Arpeggio ──────────────────────────────────────────────────────────────
-let targetNoteColor=[0.5,0.4,1.0];
-const keyDisplay=document.getElementById('key-display');
-let lastChordName='';
+function scheduleDrop(t, freq, vel, name) {
+  // Map pitch to x within the square wave buffer
+  const minHz = noteFreq('C', 3), maxHz = noteFreq('B', 5);
+  const xNorm = Math.min(Math.max((Math.log(freq/minHz) / Math.log(maxHz/minHz)), 0.05), 0.95);
+  const yNorm = 0.25 + Math.random() * 0.50;
+  const delay = Math.max(0, (t - audioCtx.currentTime) * 1000);
+  setTimeout(() => {
+    const amp = 0.12 + vel * 0.18;
+    const r   = 10 + vel * 22;
+    // pos is in square-buffer UV space [0,1]x[0,1] — already square, no correction needed
+    dropQueue.push({ pos:[xNorm, yNorm], amp, r });
+    targetNoteColor = getNoteColor(name);
+  }, delay);
+}
 
-function scheduleArpeggio(){
-  let progIdx=Math.floor(Math.random()*progressions.length);
-  let prog=progressions[progIdx];
-  let patIdx=Math.floor(Math.random()*patterns.length);
-  let chordIdx=0, noteIdx=0, notesInChord=0;
+// ── Arpeggio engine ────────────────────────────────────────────────────────
+const chordEl = document.getElementById('chord');
+let lastChord = '';
 
-  // Fox BPM: medium swing, enough room to breathe and sprint
-  const bpms=[96,100,108,112,116];
-  currentBPM = bpms[Math.floor(Math.random()*bpms.length)];
-  if(echoDelay) echoDelay.delayTime.setTargetAtTime((60/currentBPM)*0.75, audioCtx.currentTime, 0.08);
+function scheduleArpeggio() {
+  let progIdx = Math.floor(Math.random() * progressions.length);
+  let prog    = progressions[progIdx];
+  let patIdx  = Math.floor(Math.random() * patterns.length);
+  let chordIdx = 0, noteIdx = 0, notesInChord = 0;
 
-  let t = audioCtx.currentTime + 0.04;
+  // Fox: slow, 72–92 BPM, quarter/8th note feel
+  const bpms = [72, 76, 80, 84, 88, 92];
+  currentBPM = bpms[Math.floor(Math.random() * bpms.length)];
+  if (echoDelay) echoDelay.delayTime.value = (60/currentBPM) * 0.75;
 
-  // Fox phrase types — no sparse/rests, always flowing
-  // 0=swing 16ths, 1=burst 32nds, 2=triplet roll, 3=dotted swing
-  let phraseType = 0;
-  let phraseNotesLeft = 0;
+  let t = audioCtx.currentTime + 0.05;
 
-  function batch(n){
-    for(let b=0;b<n;b++){
-      if(!playing) return;
+  function batch(n) {
+    for (let b = 0; b < n; b++) {
+      if (!playing) return;
 
       const chord = prog[chordIdx];
       const pat   = patterns[patIdx];
-      // Bias toward lower 10 notes of the 15-note pool (mid/low range)
-      const rawIdx = pat[noteIdx % pat.length];
-      const ni = (rawIdx > 10 && Math.random() < 0.6)
-        ? rawIdx - 6   // pull high notes down into mid range
-        : rawIdx % chord.notes.length;
+      const ni    = pat[noteIdx % pat.length] % chord.notes.length;
       const name  = chord.notes[ni];
       const oct   = chord.octs[ni];
       const freq  = noteFreq(name, oct);
 
-      // Phrase type cycling — only flowing types, no rests
-      if(phraseNotesLeft <= 0){
-        phraseType = Math.floor(Math.random()*4);
-        phraseNotesLeft = 8 + Math.floor(Math.random()*10);
-      }
-      phraseNotesLeft--;
-
-      const beat16 = (60/currentBPM)*0.25;
-      const beat32 = beat16*0.5;
-
+      // Step timing: 8th notes with swing, occasional dotted 8th
+      const beat8 = (60/currentBPM) * 0.5;
+      const roll = Math.random();
       let step;
-      if(phraseType === 1){
-        // Burst run — rapid 32nd notes, dense shimmer
-        step = beat32 * (0.88 + Math.random()*0.22);
-      } else if(phraseType === 2){
-        // Triplet roll — swinging triplets
-        const tri = beat16*(2/3);
-        step = tri * (0.92 + Math.random()*0.16);
-      } else if(phraseType === 3){
-        // Dotted swing — longer steps but never rests
-        step = beat16 * (1.2 + Math.random()*0.5);
-      } else {
-        // Normal swing 16ths
-        const swingFactor = (noteIdx%2===0) ? 1.10 : 0.90;
-        step = beat16 * swingFactor * (0.90 + Math.random()*0.18);
-      }
-      const humanize = (Math.random()-0.5)*0.009;
+      if      (roll < 0.55) step = beat8 * (0.92 + (noteIdx%2===0 ? 0.16 : -0.04)); // swung 8th
+      else if (roll < 0.80) step = beat8 * 1.45; // dotted 8th — slight pause
+      else if (roll < 0.92) step = beat8 * 0.65; // quick 16th
+      else                  step = beat8 * 2.0;  // quarter note rest/hold
 
-      // Dynamics: continuous range, no extreme silences
+      const humanize = (Math.random()-0.5) * 0.014;
+
+      // Velocity: impressionistic dynamics — accents on certain beats, ghosts elsewhere
+      const pos = noteIdx % 12;
       let vel;
-      const pos = noteIdx % 16;
-      if(phraseType === 1){
-        vel = Math.random()<0.15 ? 0.82+Math.random()*0.18 : 0.38+Math.random()*0.32;
-      } else if(phraseType === 2){
-        vel = 0.52 + Math.random()*0.32;
-      } else if(phraseType === 3){
-        if(pos===0||pos===8)   vel = 0.80+Math.random()*0.18;
-        else                   vel = 0.45+Math.random()*0.28;
-      } else {
-        if(pos===0)              vel = 0.85+Math.random()*0.15;
-        else if(pos===8)         vel = 0.68+Math.random()*0.16;
-        else if(pos===4||pos===12) vel = 0.52+Math.random()*0.22;
-        else if(Math.random()<0.10) vel = 0.18+Math.random()*0.12; // light ghost
-        else                     vel = 0.35+Math.random()*0.30;
-      }
+      if      (pos === 0)                vel = 0.72 + Math.random()*0.20;
+      else if (pos === 6)                vel = 0.58 + Math.random()*0.22;
+      else if (pos === 3 || pos === 9)   vel = 0.45 + Math.random()*0.22;
+      else if (Math.random() < 0.12)     vel = 0.14 + Math.random()*0.10; // ghost
+      else                               vel = 0.30 + Math.random()*0.28;
 
-      // Duration — sustain mid/low notes longer for warmth
-      const durMult = phraseType===1 ? 0.85 :
-                      phraseType===2 ? 1.4 :
-                      phraseType===3 ? 1.8+Math.random()*0.8 :
-                      (Math.random()<0.10 ? 2.8 : Math.random()<0.20 ? 1.9 : 1.4);
+      const dur = step * (1.5 + Math.random()*0.8); // sustain notes long
 
-      // Chromatic grace note
-      if(Math.random()<0.12){
-        const semis = Math.random()<0.65 ? -1 : 1;
-        const gf = freq * Math.pow(2, semis/12);
-        const gt = piano(audioCtx, gf, t-0.025, 0.038, vel*0.26);
+      // Occasional chromatic grace note (Fox approach)
+      if (Math.random() < 0.10) {
+        const gf = freq * Math.pow(2, (Math.random()<0.6 ? -1 : 1)/12);
+        const gt = piano(audioCtx, gf, t - 0.022, 0.035, vel*0.25);
         gt.connect(masterGain);
       }
 
-      // Occasional lower octave doubling for mid/low warmth
-      if(Math.random()<0.08 && oct >= 2){
-        const ot = piano(audioCtx, freq*0.5, t+humanize, step*durMult*0.9, vel*0.20);
-        ot.connect(masterGain);
-      }
-
-      const tone = piano(audioCtx, freq, t+humanize, step*durMult, vel);
+      const tone = piano(audioCtx, freq, t + humanize, dur, vel);
       tone.connect(masterGain);
 
-      const schedDelay = Math.max(0,(t-audioCtx.currentTime)*1000);
-      const nc = noteColors[name] || [0.5,0.4,1.0];
-      setTimeout(()=>{ targetNoteColor=nc; }, schedDelay);
+      // Schedule visual drop at note onset
+      scheduleDrop(t + humanize, freq, vel, name);
 
       t += step;
       noteIdx++; notesInChord++;
 
-      // Chord changes every 16-24 notes (longer for Fox's extended vamps)
-      const npc = 16 + Math.floor(Math.random()*9);
-      if(notesInChord >= npc){
+      // Chord changes every 10-14 notes
+      const npc = 10 + Math.floor(Math.random()*5);
+      if (notesInChord >= npc) {
         notesInChord = 0;
         chordIdx = (chordIdx+1) % prog.length;
-        const chord2 = prog[chordIdx];
-        const cn = chord2.name;
-
-        setTimeout(()=>{
-          if(cn !== lastChordName){
-            lastChordName = cn;
-            const geomName = GEOM_NAMES[shapeIdxNext];
-            keyDisplay.textContent = cn + '  ·  ' + geomName;
-            keyDisplay.style.opacity = '1';
-            setTimeout(()=>keyDisplay.style.opacity='0.4', 1200);
-            // chord duration estimate for morph pacing
-            chordDuration = npc * (60/currentBPM) * 0.45;
-            advanceShape();
+        const cn = prog[chordIdx].name;
+        const delay = Math.max(0, (t - audioCtx.currentTime)*1000);
+        setTimeout(() => {
+          if (cn !== lastChord) {
+            lastChord = cn;
+            chordEl.textContent = cn;
+            chordEl.style.opacity = '1';
+            setTimeout(() => chordEl.style.opacity = '0.4', 1000);
+            // Shift the environment/iridescence color on chord change only
+            const rootNote = prog[chordIdx].notes[0];
+            targetChordColor = getNoteColor(rootNote);
           }
-        }, Math.max(0,(t-audioCtx.currentTime)*1000));
-
-        if(chordIdx===0){
-          progIdx = (progIdx+1+Math.floor(Math.random()*(progressions.length-1))) % progressions.length;
-          prog = progressions[progIdx];
-          patIdx = (patIdx+1+Math.floor(Math.random()*(patterns.length-1))) % patterns.length;
+        }, delay);
+        if (chordIdx === 0) {
+          progIdx = (progIdx + 1 + Math.floor(Math.random()*(progressions.length-1))) % progressions.length;
+          prog    = progressions[progIdx];
+          patIdx  = (patIdx + 1 + Math.floor(Math.random()*(patterns.length-1))) % patterns.length;
           currentBPM = bpms[Math.floor(Math.random()*bpms.length)];
-          if(echoDelay) echoDelay.delayTime.setTargetAtTime((60/currentBPM)*0.75,audioCtx.currentTime,0.12);
+          if (echoDelay) echoDelay.delayTime.value = (60/currentBPM)*0.75;
         }
       }
     }
-    const next = Math.max(0,(t-audioCtx.currentTime-0.30)*1000);
-    if(playing) arpeggioTimeout = setTimeout(()=>batch(28), next);
+    const next = Math.max(0, (t - audioCtx.currentTime - 0.35)*1000);
+    if (playing) arpeggioTimeout = setTimeout(() => batch(16), next);
   }
-  batch(28);
+  batch(16);
 }
 
-// ── Render loop ───────────────────────────────────────────────────────────
-let t0=null, lastTs=0;
-let renderEnergy=0, renderBass=0, renderMid=0, renderHigh=0;
-let renderColor=[0.5,0.4,1.0];
-
-function audioLevels(){
-  if(!analyser||!freqData) return{energy:0,bass:0,mid:0,high:0};
-  analyser.getByteFrequencyData(freqData);
-  const n=freqData.length;
-  const be=Math.floor(n*.05), me=Math.floor(n*.35);
-  let bass=0,mid=0,high=0;
-  for(let i=0;i<be;i++) bass+=freqData[i];
-  for(let i=be;i<me;i++) mid+=freqData[i];
-  for(let i=me;i<n;i++) high+=freqData[i];
-  return{
-    energy:(bass/(be*255))*.5+(mid/((me-be)*255))*.3+(high/((n-me)*255))*.2,
-    bass:bass/(be*255), mid:mid/((me-be)*255), high:high/((n-me)*255)
-  };
-}
-
-function lerp(a,b,t){return a+(b-a)*t;}
-function lerpV(a,b,t){return[lerp(a[0],b[0],t),lerp(a[1],b[1],t),lerp(a[2],b[2],t)];}
-
-function render(ts){
-  requestAnimationFrame(render);
-  if(!t0){t0=ts;lastTs=ts;}
-  const t=(ts-t0)*0.001;
-  const dt=Math.min((ts-lastTs)*0.001,0.05);
-  lastTs=ts;
-
-  // Continuously advance shape progress over chord duration
-  if(playing && chordDuration > 0){
-    const elapsed = performance.now()*0.001 - chordStartTime;
-    shapeProgress = Math.min(elapsed / chordDuration, 1.0);
-  }
-
-  // Shape blend stays high — geometry always visible, just morphing
-  shapeBlend = lerp(shapeBlend, shapeBlendTarget, Math.min(dt*3.0, 0.08));
-
-  const lv=audioLevels();
-  renderColor  = lerpV(renderColor, targetNoteColor, 0.05);
-  renderEnergy = lerp(renderEnergy, playing?lv.energy:0, 0.09);
-  renderBass   = lerp(renderBass,   playing?lv.bass:0,   0.09);
-  renderMid    = lerp(renderMid,    playing?lv.mid:0,    0.09);
-  renderHigh   = lerp(renderHigh,   playing?lv.high:0,   0.09);
-
-  gl.uniform2f(U.u_res,canvas.width,canvas.height);
-  gl.uniform1f(U.u_time,t);
-  gl.uniform1f(U.u_energy,renderEnergy);
-  gl.uniform1f(U.u_bass,renderBass);
-  gl.uniform1f(U.u_mid,renderMid);
-  gl.uniform1f(U.u_high,renderHigh);
-  gl.uniform3f(U.u_noteColor,renderColor[0],renderColor[1],renderColor[2]);
-  gl.uniform1f(U.u_shapeIdx,shapeIdx);
-  gl.uniform1f(U.u_shapeIdxNext,shapeIdxNext);
-  gl.uniform1f(U.u_shapeProgress,shapeProgress);
-  gl.uniform1f(U.u_shapeBlend,shapeBlend);
-
-  gl.drawArrays(gl.TRIANGLES,0,6);
-}
-requestAnimationFrame(render);
-
-// ── UI ────────────────────────────────────────────────────────────────────
-const btn=document.getElementById('btn');
-btn.addEventListener('click',async function(){
-  if(!playing){
-    playing=true; btn.textContent='Pause'; btn.classList.add('active');
-    if(!audioCtx) await initAudio();
-    else if(audioCtx.state==='suspended') await audioCtx.resume();
+// ── UI ─────────────────────────────────────────────────────────────────────
+const btn = document.getElementById('btn');
+btn.addEventListener('click', async () => {
+  if (!playing) {
+    playing = true; btn.textContent = 'Pause'; btn.classList.add('on');
+    if (!audioCtx) await initAudio();
+    else if (audioCtx.state === 'suspended') await audioCtx.resume();
     scheduleArpeggio();
   } else {
-    playing=false; btn.textContent='Begin'; btn.classList.remove('active');
-    if(arpeggioTimeout) clearTimeout(arpeggioTimeout);
-    if(audioCtx) audioCtx.suspend();
+    playing = false; btn.textContent = 'Begin'; btn.classList.remove('on');
+    if (arpeggioTimeout) clearTimeout(arpeggioTimeout);
+    if (audioCtx) audioCtx.suspend();
   }
 });
 </script>
