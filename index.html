@@ -14,13 +14,20 @@
   #btn{pointer-events:all;background:transparent;border:1px solid rgba(120,160,220,0.30);color:rgba(140,180,240,0.80);font-family:'Cormorant Garamond',serif;font-size:13px;font-style:italic;letter-spacing:.22em;padding:9px 30px;cursor:pointer;transition:all .4s}
   #btn:hover{background:rgba(120,160,220,0.07);border-color:rgba(120,160,220,0.6);color:#8ab4f0}
   #btn.on{border-color:rgba(100,200,255,0.45);color:rgba(100,200,255,0.85)}
+  #btnFree{pointer-events:all;background:transparent;border:1px solid rgba(200,140,255,0.30);color:rgba(200,160,255,0.70);font-family:'Cormorant Garamond',serif;font-size:13px;font-style:italic;letter-spacing:.22em;padding:9px 30px;cursor:pointer;transition:all .4s}
+  #btnFree:hover{background:rgba(180,120,255,0.07);border-color:rgba(200,140,255,0.6);color:#c88bff}
+  #btnFree.on{border-color:rgba(220,160,255,0.55);color:rgba(220,160,255,0.95)}
+  #buttons{display:flex;gap:12px;align-items:center;pointer-events:all}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="ui">
   <div id="chord"></div>
-  <button id="btn">Begin</button>
+  <div id="buttons">
+    <button id="btn">Begin</button>
+    <button id="btnFree">Free Play</button>
+  </div>
 </div>
 <script>
 // ── WebGL water ripple ─────────────────────────────────────────────────────
@@ -149,7 +156,7 @@ void main(){
   gl_FragColor = vec4(clamp(next,-1.0,1.0), c, 0.0, 1.0);
 }`;
 
-// ── Display / composite shader — sphere surface with reflective iridescence ─
+// ── Display / composite shader — deformable sphere with parabolic stretch ──
 const fsDisplay = `
 precision mediump float;
 uniform sampler2D uWave;
@@ -160,10 +167,63 @@ uniform vec3  uChordColor;
 uniform vec3  uNoteColor;
 uniform float uRotate;
 uniform float uZoom;
+uniform float uStretchAmt; // 0..1 height of parabolic spike
+uniform vec2  uStretchUV;  // planar UV position of spike base [0,1]
 
 #define PI 3.14159265
+#define MAX_STEPS 80
+#define HIT_DIST  0.002
+#define MAX_DIST  6.0
 
 vec3 rotY(vec3 p,float a){ float c=cos(a),s=sin(a); return vec3(p.x*c+p.z*s,p.y,-p.x*s+p.z*c); }
+
+// ── Deformed sphere SDF ────────────────────────────────────────────────────
+float sceneSDF(vec3 p){
+  float r = length(p);
+  float sphere = r - 1.0;
+
+  if(uStretchAmt > 0.001){
+    // Spike UV → XY on front hemisphere, clamped inside unit disc
+    vec2 spikeXY = uStretchUV * 2.0 - 1.0;
+    // Clamp to unit disc so Z is always real and forward-facing
+    float xyLen2 = dot(spikeXY, spikeXY);
+    if(xyLen2 > 0.96) spikeXY *= 0.98 / sqrt(xyLen2);
+    float zFront = sqrt(max(0.0, 1.0 - dot(spikeXY, spikeXY)));
+    // spikeDir always on FRONT hemisphere (positive Z toward camera)
+    vec3 spikeDir = vec3(spikeXY, zFront);
+    // Angular distance on sphere surface
+    float cosAng = dot(normalize(p), spikeDir);
+    float angDist = 1.0 - cosAng;
+    float spikeWidth = 0.014 + uStretchAmt * 0.006;
+    float spikeH     = uStretchAmt * 0.60;
+    float spike = spikeH * exp(-angDist / spikeWidth);
+    sphere -= spike;
+  }
+  return sphere;
+}
+
+float march(vec3 ro, vec3 rd){
+  float t = 0.0;
+  for(int i=0; i<MAX_STEPS; i++){
+    vec3 p = ro + rd*t;
+    float d = sceneSDF(p);
+    if(d < HIT_DIST) return t;
+    if(t > MAX_DIST) break;
+    // Near sphere surface use smaller step to catch the narrow spike
+    float nearSurface = smoothstep(0.3, 0.0, abs(length(p) - 1.0));
+    t += d * mix(0.80, 0.35, nearSurface);
+  }
+  return -1.0;
+}
+
+vec3 getNormal(vec3 p){
+  float e = 0.003;
+  return normalize(vec3(
+    sceneSDF(p+vec3(e,0,0))-sceneSDF(p-vec3(e,0,0)),
+    sceneSDF(p+vec3(0,e,0))-sceneSDF(p-vec3(0,e,0)),
+    sceneSDF(p+vec3(0,0,e))-sceneSDF(p-vec3(0,0,e))
+  ));
+}
 
 void main(){
   vec2 fc = gl_FragCoord.xy;
@@ -174,123 +234,76 @@ void main(){
   vec3 camPos = vec3(0.0, 0.0, uZoom);
   vec3 rayDir = normalize(vec3(ndc * 0.55, -1.0));
 
-  // Sphere intersection
-  float sphereR = 1.0;
-  float a = dot(rayDir, rayDir);
-  float b = 2.0*dot(camPos, rayDir);
-  float c2 = dot(camPos, camPos) - sphereR*sphereR;
-  float disc = b*b - 4.0*a*c2;
+  float rayT = march(camPos, rayDir);
 
-  if(disc < 0.0){
-    // Outside sphere — deep background
-    vec3 bg = vec3(0.008, 0.010, 0.020);
-    gl_FragColor = vec4(bg, 1.0);
+  if(rayT < 0.0){
+    gl_FragColor = vec4(0.008, 0.010, 0.020, 1.0);
     return;
   }
 
-  float rayT = (-b - sqrt(disc)) / (2.0*a);
-  vec3 hit = camPos + rayDir * rayT;
+  vec3 hit     = camPos + rayDir * rayT;
+  vec3 n       = getNormal(hit);
+  // Undeformed sphere normal for UV (so water texture isn't warped)
   vec3 sphereN = normalize(hit);
-  // Rotate the sphere surface (rotates wave pattern and reflection)
-  vec3 rotN = rotY(sphereN, uRotate);
 
-  // ── Map sphere surface to wave texture UV (planar, uses rotated normal) ─
-  // Use sphereN (unrotated) for UV so drops land consistently on the front face
+  // ── Wave texture UV (planar on front face) ─────────────────────────────
   vec2 sphUV = sphereN.xy * 0.5 + 0.5;
   sphUV = clamp(sphUV, 0.001, 0.999);
-
-  // Limb mask — only suppress the very outer rim (last 15% of radius)
-  // sphereN.z is always positive on the visible hemisphere
   float limbMask = smoothstep(0.0, 0.18, sphereN.z);
 
-  float px = 1.0/uRes.x;
-  float py = 1.0/uRes.y;
-  float stepX = px * 3.0;
-  float stepY = py * 3.0;
-  float hL = texture2D(uWave, sphUV-vec2(stepX,0)).r;
-  float hR = texture2D(uWave, sphUV+vec2(stepX,0)).r;
-  float hD = texture2D(uWave, sphUV-vec2(0,stepY)).r;
-  float hU = texture2D(uWave, sphUV+vec2(0,stepY)).r;
+  float px = 1.0/uRes.x, py = 1.0/uRes.y;
+  float hL = texture2D(uWave, sphUV-vec2(px*3.0,0)).r;
+  float hR = texture2D(uWave, sphUV+vec2(px*3.0,0)).r;
+  float hD = texture2D(uWave, sphUV-vec2(0,py*3.0)).r;
+  float hU = texture2D(uWave, sphUV+vec2(0,py*3.0)).r;
   float hC = texture2D(uWave, sphUV).r * limbMask;
 
-  vec3 dpdx = vec3(1.0, 0.0, 0.0);
-  vec3 dpdy = vec3(0.0, 1.0, 0.0);
-  vec3 wavePerturb = ((hL-hR)*dpdx + (hD-hU)*dpdy) * 4.5 * limbMask;
+  // Add wave perturbation on top of deformed normal
+  vec3 wavePerturb = ((hL-hR)*vec3(1,0,0) + (hD-hU)*vec3(0,1,0)) * 4.5 * limbMask;
+  n = normalize(n + wavePerturb * 0.4);
 
-  // Perturbed normal — sphere normal + wave displacement
-  vec3 n = normalize(sphereN + wavePerturb * 0.55);
+  // ── Shading (same as before) ───────────────────────────────────────────
+  vec3 V = normalize(camPos - hit);
+  vec3 R = reflect(-V, n);
 
-  // ── View & reflection ──────────────────────────────────────────────────
-  vec3 V = normalize(camPos - hit);  // view direction from surface
-  vec3 R = reflect(-V, n);           // reflection direction
+  float envLon = atan(R.x, R.z);
+  float envLat = asin(clamp(R.y,-1.0,1.0));
+  float phase  = envLon + uTime*0.04;
+  vec3 bandA   = uChordColor;
+  vec3 bandB   = vec3(1.0) - uChordColor*0.6 + vec3(0.0,0.05,0.15);
+  float latW   = cos(envLat);
+  float bandMix= 0.5+0.5*sin(phase*2.8+envLat*1.5);
+  vec3 envColor= mix(vec3(0.015,0.010,0.025), mix(bandA,bandB,bandMix)*latW*0.55, latW*latW);
 
-  // ── Procedural environment map ─────────────────────────────────────────
-  // Map R to a neon environment: dark zenith, vivid equatorial bands
-  float envLon   = atan(R.x, R.z);
-  float envLat   = asin(clamp(R.y, -1.0, 1.0));
-
-  // Phase driven by chord color shift and time (slow)
-  float phase = envLon + uTime*0.04;
-  // Bands cycle through chord color → its complement
-  vec3 bandA = uChordColor;
-  vec3 bandB = vec3(1.0) - uChordColor * 0.6 + vec3(0.0, 0.05, 0.15);
-
-  // Latitude-weighted mix: equator is vivid, poles are dark
-  float latW = cos(envLat);  // 1 at equator, 0 at poles
-  float bandMix = 0.5 + 0.5*sin(phase * 2.8 + envLat * 1.5);
-  vec3 envBand  = mix(bandA, bandB, bandMix) * latW;
-
-  // Dark pole
-  vec3 envPole  = vec3(0.015, 0.010, 0.025);
-  vec3 envColor = mix(envPole, envBand * 0.55, latW * latW);
-
-  // ── Fresnel ────────────────────────────────────────────────────────────
-  float cosV    = max(dot(n, V), 0.0);
-  float fresnel = pow(1.0 - cosV, 2.5);
-  // More Fresnel on ripple slopes
-  fresnel = clamp(fresnel + smoothstep(0.0,0.08,abs(hC))*0.4, 0.0, 1.0);
-
+  float cosV   = max(dot(n,V),0.0);
+  float fresnel= clamp(pow(1.0-cosV,2.5) + smoothstep(0.0,0.08,abs(hC))*0.4, 0.0,1.0);
   vec3 reflection = envColor * fresnel * 1.6;
 
-  // ── Iridescent thin-film (oil on water surface) ────────────────────────
-  float opd = (1.0 - cosV) * 5.5
-            + sphUV.x * 1.2 + sphUV.y * 0.9
-            + uTime * 0.05      // very slow drift
-            + hC * 3.5;
+  float opd = (1.0-cosV)*5.5 + sphUV.x*1.2 + sphUV.y*0.9 + uTime*0.05 + hC*3.5;
+  vec3 irid = vec3(0.5+0.5*sin(opd*4.0),0.5+0.5*sin(opd*4.0+2.094),0.5+0.5*sin(opd*4.0+4.188));
+  float filmStr = clamp(smoothstep(0.0,0.22,1.0-cosV)+smoothstep(0.0,0.07,abs(hC))*0.65,0.0,1.0);
+  vec3 film = irid * filmStr * 0.26;
 
-  vec3 irid = vec3(
-    0.5+0.5*sin(opd*4.0+0.0),
-    0.5+0.5*sin(opd*4.0+2.094),
-    0.5+0.5*sin(opd*4.0+4.188)
-  );
-  float filmStr = smoothstep(0.0, 0.22, 1.0-cosV)
-                + smoothstep(0.0, 0.07, abs(hC)) * 0.65;
-  vec3 film = irid * clamp(filmStr, 0.0, 1.0) * 0.26;
-
-  // ── Specular highlights ────────────────────────────────────────────────
-  vec3 l1 = normalize(vec3(0.5, 0.8, 1.5));
-  vec3 l2 = normalize(vec3(-0.7, 0.3, 1.2));
-  float s1 = pow(max(dot(n,l1),0.0), 90.0);
-  float s2 = pow(max(dot(n,l2),0.0), 50.0);
-  vec3 spec = vec3(0.60, 0.20, 1.0)*s1*0.85 + vec3(0.05,0.85,1.0)*s2*0.65;
-  // Chord color tints specular
+  vec3 l1 = normalize(vec3(0.5,0.8,1.5)), l2=normalize(vec3(-0.7,0.3,1.2));
+  float s1=pow(max(dot(n,l1),0.0),90.0), s2=pow(max(dot(n,l2),0.0),50.0);
+  vec3 spec = vec3(0.60,0.20,1.0)*s1*0.85 + vec3(0.05,0.85,1.0)*s2*0.65;
   spec = mix(spec, uChordColor*1.3, 0.22);
 
-  // ── Ripple crest glow ─────────────────────────────────────────────────
-  float crest = smoothstep(0.02, 0.22, hC);
-  // Use note color for per-drop glow (bright, fast)
-  vec3 crestGlow = mix(uChordColor*0.8, uNoteColor, 0.6) * crest * 0.20;
+  // Extra spec on the spike tip — glints brightest at the pulled apex
+  if(uStretchAmt > 0.01){
+    vec2 spikeBase = uStretchUV*2.0-1.0;
+    float distToSpike = length(sphereN.xy - spikeBase);
+    float tipGlow = smoothstep(0.3, 0.0, distToSpike) * uStretchAmt;
+    spec += uNoteColor * tipGlow * 1.4;
+  }
 
-  // ── Limb darkening — sphere edges darker, physically correct ──────────
-  float limb = pow(cosV, 0.5);  // bright at center, dark at edges
+  float crest = smoothstep(0.02,0.22,hC);
+  vec3 crestGlow = mix(uChordColor*0.8, uNoteColor, 0.6)*crest*0.20;
+  float limb = pow(cosV, 0.5);
 
-  // ── Compose ───────────────────────────────────────────────────────────
-  vec3 base = vec3(0.010, 0.012, 0.024);
-  vec3 col = (base + reflection + film + spec + crestGlow) * limb;
-
-  // Tonemap
-  col = col / (col + 0.58);
-  col = pow(max(col, 0.0), vec3(0.4545));
+  vec3 col = (vec3(0.010,0.012,0.024) + reflection + film + spec + crestGlow) * limb;
+  col = col/(col+0.58);
+  col = pow(max(col,0.0),vec3(0.4545));
   gl_FragColor = vec4(col, 1.0);
 }`;
 
@@ -335,9 +348,8 @@ function render(ts) {
   if (!t0) t0 = ts;
   const time = (ts - t0) * 0.001;
 
-  // noteColor: fast per-note flash; chordColor: very slow chord-only shift
-  noteColor  = lerpV(noteColor,  targetNoteColor,  0.12);  // fast flash
-  chordColor = lerpV(chordColor, targetChordColor, 0.008); // very slow drift
+  noteColor  = lerpV(noteColor,  targetNoteColor,  0.12);
+  chordColor = lerpV(chordColor, targetChordColor, 0.008);
 
   // Process next drop from queue
   if (dropQueue.length > 0) {
@@ -379,10 +391,12 @@ function render(ts) {
   gl.uniform2f(U(pDisplay,'uRes'),    texW, texH);
   gl.uniform2f(U(pDisplay,'uScreen'), canvas.width, canvas.height);
   gl.uniform1f(U(pDisplay,'uTime'), time);
-  gl.uniform1f(U(pDisplay,'uRotate'), time * 0.08); // slow Y rotation
-  gl.uniform1f(U(pDisplay,'uZoom'),   2.4 + 0.35 * Math.sin(time * 0.12)); // gentle zoom
+  gl.uniform1f(U(pDisplay,'uRotate'), time * 0.08);
+  gl.uniform1f(U(pDisplay,'uZoom'),   2.4 + 0.35 * Math.sin(time * 0.12));
   gl.uniform3f(U(pDisplay,'uChordColor'), chordColor[0], chordColor[1], chordColor[2]);
   gl.uniform3f(U(pDisplay,'uNoteColor'),  noteColor[0],  noteColor[1],  noteColor[2]);
+  gl.uniform1f(U(pDisplay,'uStretchAmt'), 0.0);
+  gl.uniform2f(U(pDisplay,'uStretchUV'),  0.5, 0.5);
   bindQuad(pDisplay);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
@@ -416,6 +430,10 @@ function piano(ctx, freq, when, dur, vel) {
   // Brightness: low notes stay warm even at lower velocities
   const brightBoost = 0.6 + vel * 0.8;
 
+  // Low notes need a gain boost — ear is less sensitive to bass (Fletcher-Munson)
+  // Boost by up to 2.5x for the lowest notes, tapering off above ~300Hz
+  const bassBoost = 1.0 + 1.5 * Math.max(0, 1.0 - freq / 300);
+
   [{m:1,v:1.00},{m:2,v:0.52},{m:3,v:0.30},{m:4,v:0.16},
    {m:5,v:0.09},{m:6,v:0.055},{m:7,v:0.03},{m:8,v:0.016}]
   .forEach(h => {
@@ -425,7 +443,7 @@ function piano(ctx, freq, when, dur, vel) {
     o.frequency.setValueAtTime(inharmonic, when);
 
     const harmonicVel = h.m <= 3 ? 1.0 : brightBoost;
-    const pk = h.v * vel * 0.28 * harmonicVel;
+    const pk = h.v * vel * 0.28 * harmonicVel * bassBoost;
     og.gain.setValueAtTime(0, when);
     og.gain.linearRampToValueAtTime(pk, when + 0.008);
 
@@ -440,7 +458,7 @@ function piano(ctx, freq, when, dur, vel) {
   const o2 = ctx.createOscillator(), og2 = ctx.createGain();
   o2.type = 'sine';
   o2.frequency.setValueAtTime(freq * 1.0004, when);
-  const pk2 = vel * 0.14;
+  const pk2 = vel * 0.14 * bassBoost;
   og2.gain.setValueAtTime(0, when);
   og2.gain.linearRampToValueAtTime(pk2, when + 0.009);
   og2.gain.exponentialRampToValueAtTime(0.0001, when + effectiveDur * 2.0);
@@ -465,66 +483,7 @@ function piano(ctx, freq, when, dur, vel) {
   return g;
 }
 
-// Ethereal string pad — bowed quality, evolving filter, organic detuning + vibrato
-function pad(ctx, notes, octs, when, dur) {
-  const g = ctx.createGain();
-  const attackTime  = 2.8;
-  const holdTime    = dur;
-  const releaseTime = 3.5;
-  const totalTime   = holdTime + releaseTime;
 
-  // Master pad gain — swell in and out
-  g.gain.setValueAtTime(0, when);
-  g.gain.linearRampToValueAtTime(0.22, when + attackTime);
-  g.gain.setValueAtTime(0.22, when + holdTime);
-  g.gain.linearRampToValueAtTime(0, when + totalTime);
-
-  // Play root, 5th, 7th of chord for open string-orchestra voicing
-  const idxs = [0, 3, 5];
-  idxs.forEach((idx, vi) => {
-    const name = notes[idx] || notes[notes.length - 1];
-    const oct  = octs[idx]  || octs[octs.length - 1];
-    const freq = noteFreq(name, oct);
-
-    // Three detuned sawtooth oscillators per voice — like multiple bows on a section
-    [-0.006, 0, 0.007].forEach((detuneFrac, di) => {
-      const osc = ctx.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(freq * (1 + detuneFrac), when);
-
-      // Slow organic vibrato via LFO — each voice has slightly different rate
-      const lfo = ctx.createOscillator();
-      const lfoGain = ctx.createGain();
-      lfo.type = 'sine';
-      lfo.frequency.value = 0.28 + vi * 0.07 + di * 0.05; // 0.28–0.45 Hz
-      lfoGain.gain.setValueAtTime(0, when);
-      // Vibrato swells in slowly (like a bowed note)
-      lfoGain.gain.linearRampToValueAtTime(freq * 0.0035, when + attackTime * 1.4);
-      lfo.connect(lfoGain);
-      lfoGain.connect(osc.frequency);
-      lfo.start(when); lfo.stop(when + totalTime + 0.2);
-
-      // Evolving lowpass filter — opens up over time (swell from dark to bright)
-      const filt = ctx.createBiquadFilter();
-      filt.type = 'lowpass';
-      filt.Q.value = 1.8; // slight resonance for string body
-      // Start dark, slowly bloom open
-      filt.frequency.setValueAtTime(freq * 1.5, when);
-      filt.frequency.linearRampToValueAtTime(freq * 6.0, when + attackTime * 1.8);
-      filt.frequency.linearRampToValueAtTime(freq * 3.5, when + holdTime); // close back down
-
-      // Per-voice volume — slightly different for organic ensemble feel
-      const vg = ctx.createGain();
-      const voiceLevel = (0.18 / idxs.length) * (1.0 - di * 0.08);
-      vg.gain.setValueAtTime(voiceLevel, when);
-
-      osc.connect(filt); filt.connect(vg); vg.connect(g);
-      osc.start(when); osc.stop(when + totalTime + 0.2);
-    });
-  });
-
-  return g;
-}
 
 
 async function makeReverb(ctx) {
@@ -556,8 +515,8 @@ async function initAudio() {
   const echoWet = audioCtx.createGain();
   const echoDry = audioCtx.createGain();
   echoDelay.delayTime.value = 0.36;
-  echoFb.gain.value  = 0.36;
-  echoWet.gain.value = 0.25;
+  echoFb.gain.value  = 0.28;
+  echoWet.gain.value = 0.18;
   echoDry.gain.value = 1.0;
   echoDelay.connect(echoFb); echoFb.connect(echoDelay); echoDelay.connect(echoWet);
 
@@ -568,8 +527,8 @@ async function initAudio() {
   const eq = audioCtx.createBiquadFilter();
   eq.type = 'highshelf'; eq.frequency.value = 5000; eq.gain.value = 2;
 
-  const revWet = audioCtx.createGain(); revWet.gain.value = 0.80;
-  const revDry = audioCtx.createGain(); revDry.gain.value = 0.42;
+  const revWet = audioCtx.createGain(); revWet.gain.value = 0.38;
+  const revDry = audioCtx.createGain(); revDry.gain.value = 0.75;
   const post   = audioCtx.createGain();
 
   masterGain.connect(echoDry); masterGain.connect(echoDelay);
@@ -583,52 +542,61 @@ async function initAudio() {
 // ── Musical data — Elijah Fox style ───────────────────────────────────────
 // Chord progressions, tight octave range 3-5, impressionistic voicings
 const progressions = [
-  // Dm9 → G13 → Cmaj9 → Fmaj7
+  // Dm9 → G13 → Cmaj9
   [
-    {name:'Dm9',    notes:['C','D','F','A','E','C','D','F','A'],        octs:[2,2,2,2,3,3,3,4,4]},
-    {name:'G13',    notes:['B','D','F','A','E','B','D','F','G'],        octs:[2,2,2,2,3,3,4,4,4]},
-    {name:'Cmaj9',  notes:['B','C','E','G','D','B','C','E','G'],        octs:[2,3,3,3,4,3,4,5,5]},
-    {name:'Fmaj7',  notes:['A','C','E','F','B','A','C','E','F'],        octs:[2,3,3,3,3,3,4,5,5]},
+    {name:'Dm9',   notes:['C','D','F','A','E','C','D','F','A'],     octs:[3,3,3,3,4,4,4,5,5]},
+    {name:'G13',   notes:['B','D','F','A','E','B','D','F','G'],     octs:[3,3,3,3,4,4,5,5,5]},
+    {name:'Cmaj9', notes:['B','C','E','G','D','B','C','E','G'],     octs:[3,4,4,4,5,4,5,6,6]},
   ],
-  // Ebmaj7 → Ab13 → Dbmaj9 → Gm11
+  // Ebmaj7 → Ab13 → Dbmaj9
   [
-    {name:'Ebmaj7', notes:['Ds','G','As','D','F','Ds','G','As','D'],    octs:[2,2,2,3,3,3,4,4,5]},
-    {name:'Ab13',   notes:['C','Ds','G','F','As','C','Ds','G','As'],    octs:[2,2,2,3,3,3,4,4,5]},
-    {name:'Dbmaj9', notes:['Cs','F','Gs','C','Ds','Cs','F','Gs','C'],   octs:[2,2,2,3,3,3,4,4,5]},
-    {name:'Gm11',   notes:['G','As','D','F','C','G','As','D','F'],      octs:[2,2,3,3,4,3,4,5,5]},
+    {name:'Ebmaj7',notes:['Ds','G','As','D','F','Ds','G','As','D'], octs:[3,3,3,4,4,4,5,5,6]},
+    {name:'Ab13',  notes:['C','Ds','G','F','As','C','Ds','G','As'], octs:[3,3,3,4,4,4,5,5,6]},
+    {name:'Dbmaj9',notes:['Cs','F','Gs','C','Ds','Cs','F','Gs','C'],octs:[3,3,3,4,4,4,5,5,6]},
   ],
-  // Am11 → D9 → Gmaj7 → Cmaj7
+  // Am11 → D9 → Gmaj7
   [
-    {name:'Am11',   notes:['A','C','E','G','D','A','C','E','G'],        octs:[2,2,2,2,3,3,4,4,4]},
-    {name:'D9',     notes:['D','Fs','A','C','E','D','Fs','A','C'],      octs:[2,2,2,3,3,3,4,4,5]},
-    {name:'Gmaj7',  notes:['G','B','D','Fs','A','G','B','D','Fs'],      octs:[2,2,3,3,3,3,4,5,5]},
-    {name:'Cmaj7',  notes:['C','E','G','B','D','C','E','G','B'],        octs:[2,2,2,2,3,3,4,4,4]},
-  ],
-  // Fm9 → Cm9 → Bbm9 → Ebmaj9
-  [
-    {name:'Fm9',    notes:['F','As','C','Ds','G','F','As','C','Ds'],    octs:[2,2,3,3,3,3,4,5,5]},
-    {name:'Cm9',    notes:['C','Ds','G','As','D','C','Ds','G','As'],    octs:[2,2,2,3,3,3,4,4,5]},
-    {name:'Bbm9',   notes:['As','Cs','F','Gs','C','As','Cs','F','Gs'],  octs:[2,2,2,3,3,3,4,4,5]},
-    {name:'Ebmaj9', notes:['Ds','G','As','D','F','Ds','G','As','D'],    octs:[2,2,2,3,3,3,4,4,5]},
+    {name:'Am11',  notes:['A','C','E','G','D','A','C','E','G'],     octs:[3,3,3,3,4,4,5,5,5]},
+    {name:'D9',    notes:['D','Fs','A','C','E','D','Fs','A','C'],   octs:[3,3,3,4,4,4,5,5,6]},
+    {name:'Gmaj7', notes:['G','B','D','Fs','A','G','B','D','Fs'],   octs:[3,3,4,4,4,4,5,6,6]},
   ],
 ];
 
-// Patterns — all start on root (index 0) then traverse upward
-// Index 0 = lowest note of chord (root), higher indices = higher notes
-const patterns = [
-  // Root anchor, then steady climb
-  [0, 0,1,2,3,4, 3,2,1,0, 1,3,5,7, 6,4,2,0, 2,4,6,8],
-  // Root + leap up, then fill in descending
-  [0, 2,4,6,8, 8,7,6,5,4,3,2,1,0, 0,3,5,7, 6,3,1],
-  // Root pedal with upper voice
-  [0,0, 4,0, 5,0, 6,0, 7,0, 8,0, 7,5,3,1,0],
-  // Root, then Fox-style 5+4 displacement climbing
-  [0, 1,2,3,4,5, 3,4,5,6,7, 5,6,7,8, 6,4,2,0],
-  // Root + spread arpeggio upward then waterfall
-  [0, 2,4,6, 8,7,6,5,4,3,2,1, 0,1,3,5,7, 4,2,0],
-  // Root + impressionist scatter ascending
-  [0, 1,3,2,4,3,5,4,6,5,7,6,8, 5,3,1,0],
+// ── Dynamic arpeggio shape generator ──────────────────────────────────────
+// Generates a melodic cell from chord tones, then repeats it up octaves.
+// Returns a flat array of {name, oct} objects ready to play in sequence.
+
+// Contour shapes for the cell — intervals within the chord's sorted note pool
+const cellContours = [
+  [0,1,2,1],        // neighbor wave: up-up-down
+  [0,2,1,3],        // skip and fill
+  [0,1,3,2],        // up leap then step back
+  [0,2,4,2],        // triad outline
+  [0,1,2,3],        // straight ascent
+  [0,3,1,2],        // Fox leap-and-return
+  [0,1,0,2,1,3],   // longer winding phrase
+  [0,2,1,3,2,4],   // climbing thirds
 ];
+
+function buildArpeggioSequence(chord) {
+  const pool = chord.notes.map((n, i) => ({
+    name: n, oct: chord.octs[i], freq: noteFreq(n, chord.octs[i])
+  })).sort((a, b) => a.freq - b.freq);
+
+  const contour = cellContours[Math.floor(Math.random() * cellContours.length)];
+  const octaves = [...new Set(pool.map(n => n.oct))].sort((a,b) => a-b);
+
+  const sequence = [];
+  octaves.forEach(startOct => {
+    const localPool = pool.filter(n => n.oct === startOct || n.oct === startOct + 1);
+    if (localPool.length < 2) return;
+    contour.forEach(ci => {
+      sequence.push(localPool[Math.min(ci, localPool.length - 1)]);
+    });
+  });
+
+  return sequence.length > 0 ? sequence : pool;
+}
 
 // Neon note colors — vivid, iridescent, matches the original 3D palette
 const noteColors = {
@@ -651,12 +619,11 @@ function getNoteColor(name) {
 }
 
 function scheduleDrop(t, freq, vel, name) {
-  // Map pitch to x, constrained to central UV region (planar proj is accurate here)
-  const minHz = noteFreq('C', 2), maxHz = noteFreq('B', 5);
-  const xRaw = Math.min(Math.max((Math.log(freq/minHz) / Math.log(maxHz/minHz)), 0), 1);
-  // Remap 0..1 into 0.2..0.8 so drops stay away from limb
-  const xNorm = 0.2 + xRaw * 0.6;
-  const yNorm = 0.2 + Math.random() * 0.6;
+  // Pitch range matches arpeggio: oct 3 (C3≈130Hz) to oct 6 (B6≈1976Hz)
+  const minHz = noteFreq('C', 3), maxHz = noteFreq('B', 6);
+  const pitchNorm = Math.min(Math.max((Math.log(freq/minHz) / Math.log(maxHz/minHz)), 0), 1);
+  const xNorm = 0.25 + Math.random() * 0.50;
+  const yNorm = 0.12 + pitchNorm * 0.76; // full sphere height mapped to pitch
   const delay = Math.max(0, (t - audioCtx.currentTime) * 1000);
   setTimeout(() => {
     const amp = 0.14 + vel * 0.20;
@@ -673,11 +640,16 @@ let lastChord = '';
 function scheduleArpeggio() {
   let progIdx = Math.floor(Math.random() * progressions.length);
   let prog    = progressions[progIdx];
-  let patIdx  = Math.floor(Math.random() * patterns.length);
   let chordIdx = 0, noteIdx = 0, notesInChord = 0;
+  // Set immediately so taps work before first chord change
+  currentChordNotes = prog[0].notes;
+  currentChordOcts  = prog[0].octs;
 
-  // Fox: slow, 72–92 BPM, quarter/8th note feel
-  const bpms = [72, 76, 80, 84, 88, 92];
+  let arpeggioSeq = buildArpeggioSequence(prog[0]);
+  let lastPlayedFreq = -1;
+
+  // Slower, more spacious — let each chord breathe
+  const bpms = [60, 66, 72, 76, 80];
   currentBPM = bpms[Math.floor(Math.random() * bpms.length)];
   if (echoDelay) echoDelay.delayTime.value = (60/currentBPM) * 0.75;
 
@@ -688,41 +660,39 @@ function scheduleArpeggio() {
       if (!playing) return;
 
       const chord = prog[chordIdx];
-      const pat   = patterns[patIdx];
-      const ni    = pat[noteIdx % pat.length] % chord.notes.length;
-      const name  = chord.notes[ni];
-      const oct   = chord.octs[ni];
+      // Advance past any note that would repeat the previous one
+      let seqNote = arpeggioSeq[noteIdx % arpeggioSeq.length];
+      let skipCount = 0;
+      while (skipCount < arpeggioSeq.length - 1 &&
+             noteFreq(seqNote.name, seqNote.oct) === lastPlayedFreq) {
+        noteIdx++;
+        seqNote = arpeggioSeq[noteIdx % arpeggioSeq.length];
+        skipCount++;
+      }
+      const name  = seqNote.name;
+      const oct   = seqNote.oct;
       const freq  = noteFreq(name, oct);
+      lastPlayedFreq = freq;
+      // Position in sequence 0..1 (low=bass, high=treble) for velocity shaping
+      const seqPos = (noteIdx % arpeggioSeq.length) / arpeggioSeq.length;
 
-      // Step timing: 8th notes with swing, occasional dotted 8th
       const beat8 = (60/currentBPM) * 0.5;
       const roll = Math.random();
       let step;
-      if      (roll < 0.55) step = beat8 * (0.92 + (noteIdx%2===0 ? 0.16 : -0.04)); // swung 8th
-      else if (roll < 0.80) step = beat8 * 1.45; // dotted 8th — slight pause
-      else if (roll < 0.92) step = beat8 * 0.65; // quick 16th
-      else                  step = beat8 * 2.0;  // quarter note rest/hold
+      if      (roll < 0.65) step = beat8 * (0.88 + (noteIdx%2===0 ? 0.14 : -0.04));
+      else if (roll < 0.88) step = beat8 * 1.25;
+      else                  step = beat8 * 1.8;
 
       const humanize = (Math.random()-0.5) * 0.014;
 
-      // Velocity — bass notes (low pattern index) always full voice
-      const pos = noteIdx % 12;
-      const isLow = ni <= 2; // first 3 notes of chord pool = bass register
+      // Velocity: accent on sequence start, taper toward middle, lift at top
       let vel;
-      if (isLow) {
-        // Bass notes: always warm and present, no ghosts
-        vel = 0.65 + Math.random() * 0.28;
-      } else if (pos === 0) {
-        vel = 0.72 + Math.random() * 0.20;
-      } else if (pos === 6) {
-        vel = 0.55 + Math.random() * 0.22;
-      } else if (pos === 3 || pos === 9) {
-        vel = 0.42 + Math.random() * 0.22;
-      } else if (Math.random() < 0.08) {   // fewer ghosts
-        vel = 0.18 + Math.random() * 0.10;
-      } else {
-        vel = 0.32 + Math.random() * 0.28;
-      }
+      const pos = noteIdx % 12;
+      if (pos === 0)               vel = 0.80 + Math.random() * 0.18;
+      else if (seqPos < 0.15)      vel = 0.72 + Math.random() * 0.20;
+      else if (seqPos > 0.85)      vel = 0.60 + Math.random() * 0.22;
+      else if (Math.random() < 0.08) vel = 0.18 + Math.random() * 0.10;
+      else                         vel = 0.35 + Math.random() * 0.28;
 
       const dur = step * (1.5 + Math.random()*0.8); // sustain notes long
 
@@ -742,11 +712,14 @@ function scheduleArpeggio() {
       t += step;
       noteIdx++; notesInChord++;
 
-      // Chord changes every 10-14 notes
-      const npc = 10 + Math.floor(Math.random()*5);
+      // Chord holds for 24-32 notes
+      const npc = 24 + Math.floor(Math.random()*9);
       if (notesInChord >= npc) {
         notesInChord = 0;
         chordIdx = (chordIdx+1) % prog.length;
+        // Generate a fresh shape for the new chord
+        arpeggioSeq = buildArpeggioSequence(prog[chordIdx]);
+        lastPlayedFreq = -1;
         const cn = prog[chordIdx].name;
         const delay = Math.max(0, (t - audioCtx.currentTime)*1000);
         setTimeout(() => {
@@ -758,18 +731,16 @@ function scheduleArpeggio() {
             // Shift the environment/iridescence color on chord change only
             const rootNote = prog[chordIdx].notes[0];
             targetChordColor = getNoteColor(rootNote);
+            // Update violin's scale reference + retune if playing
+            currentChordNotes = prog[chordIdx].notes;
+            currentChordOcts  = prog[chordIdx].octs;
           }
         }, delay);
 
-        // Pad swell for this chord — scheduled ahead of time
-        const chordDur = npc * (60/currentBPM) * 0.5;
-        const padTone = pad(audioCtx, prog[chordIdx].notes, prog[chordIdx].octs,
-                            t, chordDur);
-        padTone.connect(masterGain);
         if (chordIdx === 0) {
           progIdx = (progIdx + 1 + Math.floor(Math.random()*(progressions.length-1))) % progressions.length;
           prog    = progressions[progIdx];
-          patIdx  = (patIdx + 1 + Math.floor(Math.random()*(patterns.length-1))) % patterns.length;
+          arpeggioSeq = buildArpeggioSequence(prog[0]);
           currentBPM = bpms[Math.floor(Math.random()*bpms.length)];
           if (echoDelay) echoDelay.delayTime.value = (60/currentBPM)*0.75;
         }
@@ -781,20 +752,203 @@ function scheduleArpeggio() {
   batch(16);
 }
 
+// (no stretch deformation in tap mode)
+
+// ── Scale helpers for tap interaction ─────────────────────────────────────
+let currentChordNotes = null;
+let currentChordOcts  = null;
+
+function getScaleFreqs() {
+  // Build sorted list of frequencies from current chord pool
+  if (!currentChordNotes) return [];
+  const freqs = currentChordNotes.map((n,i) => noteFreq(n, currentChordOcts[i]));
+  return freqs.sort((a,b)=>a-b);
+}
+
+// ── Tap interaction ────────────────────────────────────────────────────────
+
+// Replicate the shader's ray-sphere intersection in JS to get exact hit UV
+function screenToSphereUV(px, py) {
+  const W = innerWidth, H = innerHeight;
+  const aspect = W / H;
+  // Match shader exactly: ndc = (screenUV*2-1)*vec2(aspect,1), rayDir = normalize(vec3(ndc*0.55,-1))
+  const ndcX = ((px / W) * 2.0 - 1.0) * aspect;
+  const ndcY =  (py / H) * 2.0 - 1.0;   // screen Y: top=-1, bottom=+1 in WebGL but shader flips via fragCoord
+  // fragCoord.y = canvas.height - screen_py*dpr  → screenUV.y = fragCoord.y/height = 1 - py/H
+  const suvY = 1.0 - py / H;
+  const ndcX2 = ((px / W) * 2.0 - 1.0) * aspect;
+  const ndcY2 = (suvY * 2.0 - 1.0);
+
+  // Camera
+  const zoom = 2.4; // base zoom (ignore the sin oscillation for hit testing)
+  const camZ = zoom;
+  const rdX = ndcX2 * 0.55;
+  const rdY = ndcY2 * 0.55;
+  const rdZ = -1.0;
+  const rdLen = Math.sqrt(rdX*rdX + rdY*rdY + rdZ*rdZ);
+  const rx = rdX/rdLen, ry = rdY/rdLen, rz = rdZ/rdLen;
+
+  // Ray-sphere intersection: sphere radius 1 at origin, ray from (0,0,camZ)
+  const b = 2.0 * (rz * camZ); // only z component since camPos=(0,0,camZ)
+  const c = camZ*camZ - 1.0;
+  const disc = b*b - 4.0*c;  // a=1 since ray is normalised
+  if (disc < 0) return null;
+
+  const t = (-b - Math.sqrt(disc)) / 2.0;
+  if (t < 0) return null;
+
+  // Hit point = sphere normal (unit sphere centred at origin)
+  const hx = rx*t, hy = ry*t, hz = rz*t + camZ; // wait — camPos is (0,0,camZ), ray from there
+  // hit = camPos + rd*t
+  const hitX = rx*t;
+  const hitY = ry*t;
+  const hitZ = camZ + rz*t;
+  const len = Math.sqrt(hitX*hitX + hitY*hitY + hitZ*hitZ);
+  const snX = hitX/len, snY = hitY/len; // sphereN.xy
+
+  // Planar UV: sphereN.xy * 0.5 + 0.5  (matches shader)
+  const u = Math.min(Math.max(snX * 0.5 + 0.5, 0.02), 0.98);
+  const v = Math.min(Math.max(snY * 0.5 + 0.5, 0.02), 0.98);
+  return { u, v, yNorm: (snY * 0.5 + 0.5) }; // yNorm: 0=bottom, 1=top
+}
+
+function getSphereScreenBounds() {
+  // Used only for hit-testing — approximate screen radius
+  const zoom = 2.4;
+  const ndcRadius = 0.55 / zoom;
+  const radiusPx  = ndcRadius * innerHeight * 0.92;
+  return { cx: innerWidth * 0.5, cy: innerHeight * 0.5, r: radiusPx };
+}
+
+function tapNote(px, py, hit) {
+  if (!audioCtx) return;
+
+  const notes = currentChordNotes || progressions[0][0].notes;
+  const octs  = currentChordOcts  || progressions[0][0].octs;
+
+  // Build pool across octaves 3-6 — same range as arpeggio
+  const pool = [];
+  notes.forEach(n => {
+    [3,4,5,6].forEach(o => pool.push({ freq: noteFreq(n, o), name: n }));
+  });
+  pool.sort((a, b) => a.freq - b.freq);
+
+  // yNorm from ray-cast: 0=bottom, 1=top → low to high pitch
+  const yNorm = hit ? hit.yNorm : 0.5;
+  const idx   = Math.round(yNorm * (pool.length - 1));
+  const note  = pool[Math.max(0, Math.min(pool.length - 1, idx))];
+  const vel   = 0.65 + Math.random() * 0.30;
+
+  const tone = piano(audioCtx, note.freq, audioCtx.currentTime, 1.6, vel);
+  tone.connect(masterGain);
+  targetNoteColor = getNoteColor(note.name);
+}
+
+function onPointerDown(e) {
+  if (e.target === document.getElementById('btn')) return;
+  const px = e.clientX ?? e.touches?.[0]?.clientX;
+  const py = e.clientY ?? e.touches?.[0]?.clientY;
+  if (px == null) return;
+
+  // Ray-cast to get exact sphere UV at click point
+  const hit = screenToSphereUV(px, py);
+  if (!hit) return; // missed sphere entirely
+  e.preventDefault();
+
+  // Drop at the exact UV position on the sphere surface
+  dropQueue.push({ pos: [hit.u, hit.v], amp: 0.22, r: 20 });
+
+  if ((playing || freePlay) && audioCtx) tapNote(px, py, hit);
+}
+
+// Bind pointer events — tap only, no drag needed
+canvas.addEventListener('mousedown',  onPointerDown);
+canvas.addEventListener('touchstart', onPointerDown, {passive:false});
+
 // ── UI ─────────────────────────────────────────────────────────────────────
-const btn = document.getElementById('btn');
-btn.addEventListener('click', async () => {
-  if (!playing) {
-    playing = true; btn.textContent = 'Pause'; btn.classList.add('on');
-    if (!audioCtx) await initAudio();
-    else if (audioCtx.state === 'suspended') await audioCtx.resume();
-    scheduleArpeggio();
-  } else {
-    playing = false; btn.textContent = 'Begin'; btn.classList.remove('on');
-    if (arpeggioTimeout) clearTimeout(arpeggioTimeout);
-    if (audioCtx) audioCtx.suspend();
+let freePlay = false;
+let freePlayTimeout = null;
+
+// Free Play: cycles chords at same pace but plays no notes — tapping does
+function scheduleFreePlay() {
+  let progIdx  = Math.floor(Math.random() * progressions.length);
+  let prog     = progressions[progIdx];
+  let chordIdx = 0;
+  const bpms   = [60, 66, 72, 76, 80];
+  currentBPM   = bpms[Math.floor(Math.random() * bpms.length)];
+
+  // Chord duration matches arpeggio: ~24-32 notes × beat8
+  function advanceChord() {
+    if (!freePlay) return;
+    const npc = 24 + Math.floor(Math.random() * 9);
+    const beat8 = (60/currentBPM) * 0.5;
+    const chordMs = npc * beat8 * 1000;
+
+    const chord = prog[chordIdx];
+    const cn = chord.name;
+    if (cn !== lastChord) {
+      lastChord = cn;
+      chordEl.textContent = cn;
+      chordEl.style.opacity = '1';
+      setTimeout(() => chordEl.style.opacity = '0.4', 1000);
+      targetChordColor = getNoteColor(chord.notes[0]);
+      currentChordNotes = chord.notes;
+      currentChordOcts  = chord.octs;
+    }
+
+    chordIdx = (chordIdx + 1) % prog.length;
+    if (chordIdx === 0) {
+      progIdx = (progIdx + 1 + Math.floor(Math.random()*(progressions.length-1))) % progressions.length;
+      prog = progressions[progIdx];
+      currentBPM = bpms[Math.floor(Math.random() * bpms.length)];
+    }
+
+    freePlayTimeout = setTimeout(advanceChord, chordMs);
   }
+
+  // Initialise immediately
+  currentChordNotes = prog[0].notes;
+  currentChordOcts  = prog[0].octs;
+  advanceChord();
+}
+
+const btn = document.getElementById('btn');
+const btnFree = document.getElementById('btnFree');
+
+async function ensureAudio() {
+  if (!audioCtx) await initAudio();
+  else if (audioCtx.state === 'suspended') await audioCtx.resume();
+}
+
+function stopAll() {
+  playing = false; freePlay = false;
+  if (arpeggioTimeout) clearTimeout(arpeggioTimeout);
+  if (freePlayTimeout)  clearTimeout(freePlayTimeout);
+  btn.textContent = 'Begin'; btn.classList.remove('on');
+  btnFree.textContent = 'Free Play'; btnFree.classList.remove('on');
+}
+
+btn.addEventListener('click', async () => {
+  if (playing) { stopAll(); if (audioCtx) audioCtx.suspend(); return; }
+  stopAll();
+  await ensureAudio();
+  playing = true;
+  btn.textContent = 'Pause'; btn.classList.add('on');
+  scheduleArpeggio();
 });
+
+btnFree.addEventListener('click', async () => {
+  if (freePlay) { stopAll(); if (audioCtx) audioCtx.suspend(); return; }
+  stopAll();
+  await ensureAudio();
+  freePlay = true;
+  btnFree.textContent = 'Stop'; btnFree.classList.add('on');
+  scheduleFreePlay();
+});
+
+// Also prevent btn clicks from being caught by onPointerDown
+document.getElementById('buttons').addEventListener('mousedown', e => e.stopPropagation());
+document.getElementById('buttons').addEventListener('touchstart', e => e.stopPropagation(), {passive:false});
 </script>
 </body>
 </html>
