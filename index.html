@@ -425,7 +425,7 @@ function piano(ctx, freq, when, dur, vel) {
     o.frequency.setValueAtTime(inharmonic, when);
 
     const harmonicVel = h.m <= 3 ? 1.0 : brightBoost;
-    const pk = h.v * vel * 0.23 * harmonicVel;
+    const pk = h.v * vel * 0.28 * harmonicVel;
     og.gain.setValueAtTime(0, when);
     og.gain.linearRampToValueAtTime(pk, when + 0.008);
 
@@ -465,38 +465,62 @@ function piano(ctx, freq, when, dur, vel) {
   return g;
 }
 
-// Soft pad — slow attack swell, detuned oscillators, very gentle
+// Ethereal string pad — bowed quality, evolving filter, organic detuning + vibrato
 function pad(ctx, notes, octs, when, dur) {
   const g = ctx.createGain();
-  const attackTime = 2.2;  // slow swell
-  const releaseTime = dur + 1.8;
+  const attackTime  = 2.8;
+  const holdTime    = dur;
+  const releaseTime = 3.5;
+  const totalTime   = holdTime + releaseTime;
+
+  // Master pad gain — swell in and out
   g.gain.setValueAtTime(0, when);
-  g.gain.linearRampToValueAtTime(0.18, when + attackTime);
-  g.gain.setValueAtTime(0.18, when + dur - 0.5);
-  g.gain.linearRampToValueAtTime(0, when + releaseTime);
+  g.gain.linearRampToValueAtTime(0.22, when + attackTime);
+  g.gain.setValueAtTime(0.22, when + holdTime);
+  g.gain.linearRampToValueAtTime(0, when + totalTime);
 
-  // Play 3 chord tones as pad (root, 3rd, 7th feel)
-  const padNotes = [notes[0], notes[2] || notes[1], notes[4] || notes[3] || notes[1]];
-  const padOcts  = [octs[0],  octs[2]  || octs[1],  octs[4]  || octs[3]  || octs[1]];
+  // Play root, 5th, 7th of chord for open string-orchestra voicing
+  const idxs = [0, 3, 5];
+  idxs.forEach((idx, vi) => {
+    const name = notes[idx] || notes[notes.length - 1];
+    const oct  = octs[idx]  || octs[octs.length - 1];
+    const freq = noteFreq(name, oct);
 
-  padNotes.forEach((name, i) => {
-    const freq = noteFreq(name, padOcts[i]);
-    // Two slightly detuned sines per voice for that shimmer
-    [0, 0.008].forEach(detune => {
-      const o = ctx.createOscillator(), og = ctx.createGain();
-      o.type = 'sine';
-      o.frequency.setValueAtTime(freq * (1 + detune), when);
-      og.gain.setValueAtTime(0.28 / padNotes.length, when);
-      o.connect(og); og.connect(g);
-      o.start(when); o.stop(when + releaseTime + 0.1);
+    // Three detuned sawtooth oscillators per voice — like multiple bows on a section
+    [-0.006, 0, 0.007].forEach((detuneFrac, di) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(freq * (1 + detuneFrac), when);
+
+      // Slow organic vibrato via LFO — each voice has slightly different rate
+      const lfo = ctx.createOscillator();
+      const lfoGain = ctx.createGain();
+      lfo.type = 'sine';
+      lfo.frequency.value = 0.28 + vi * 0.07 + di * 0.05; // 0.28–0.45 Hz
+      lfoGain.gain.setValueAtTime(0, when);
+      // Vibrato swells in slowly (like a bowed note)
+      lfoGain.gain.linearRampToValueAtTime(freq * 0.0035, when + attackTime * 1.4);
+      lfo.connect(lfoGain);
+      lfoGain.connect(osc.frequency);
+      lfo.start(when); lfo.stop(when + totalTime + 0.2);
+
+      // Evolving lowpass filter — opens up over time (swell from dark to bright)
+      const filt = ctx.createBiquadFilter();
+      filt.type = 'lowpass';
+      filt.Q.value = 1.8; // slight resonance for string body
+      // Start dark, slowly bloom open
+      filt.frequency.setValueAtTime(freq * 1.5, when);
+      filt.frequency.linearRampToValueAtTime(freq * 6.0, when + attackTime * 1.8);
+      filt.frequency.linearRampToValueAtTime(freq * 3.5, when + holdTime); // close back down
+
+      // Per-voice volume — slightly different for organic ensemble feel
+      const vg = ctx.createGain();
+      const voiceLevel = (0.18 / idxs.length) * (1.0 - di * 0.08);
+      vg.gain.setValueAtTime(voiceLevel, when);
+
+      osc.connect(filt); filt.connect(vg); vg.connect(g);
+      osc.start(when); osc.stop(when + totalTime + 0.2);
     });
-    // Sub-octave sine for warmth
-    const sub = ctx.createOscillator(), subG = ctx.createGain();
-    sub.type = 'sine';
-    sub.frequency.setValueAtTime(freq * 0.5, when);
-    subG.gain.setValueAtTime(0.12 / padNotes.length, when);
-    sub.connect(subG); subG.connect(g);
-    sub.start(when); sub.stop(when + releaseTime + 0.1);
   });
 
   return g;
@@ -523,7 +547,7 @@ async function makeReverb(ctx) {
 
 async function initAudio() {
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  masterGain = audioCtx.createGain(); masterGain.gain.value = 0.68;
+  masterGain = audioCtx.createGain(); masterGain.gain.value = 0.88;
 
   const reverb = await makeReverb(audioCtx);
 
@@ -532,14 +556,14 @@ async function initAudio() {
   const echoWet = audioCtx.createGain();
   const echoDry = audioCtx.createGain();
   echoDelay.delayTime.value = 0.36;
-  echoFb.gain.value  = 0.38;
-  echoWet.gain.value = 0.28;
+  echoFb.gain.value  = 0.36;
+  echoWet.gain.value = 0.25;
   echoDry.gain.value = 1.0;
   echoDelay.connect(echoFb); echoFb.connect(echoDelay); echoDelay.connect(echoWet);
 
   const comp = audioCtx.createDynamicsCompressor();
-  comp.threshold.value = -18; comp.knee.value = 8; comp.ratio.value = 3;
-  comp.attack.value = 0.004; comp.release.value = 0.20;
+  comp.threshold.value = -10; comp.knee.value = 12; comp.ratio.value = 2;
+  comp.attack.value = 0.008; comp.release.value = 0.30;
 
   const eq = audioCtx.createBiquadFilter();
   eq.type = 'highshelf'; eq.frequency.value = 5000; eq.gain.value = 2;
